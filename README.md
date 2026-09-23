@@ -17,10 +17,8 @@ Firmware only answers the web app from origins compiled into it
 v3.0.4 and earlier trust only apps.crp.to. After the handshake each site
 reads the firmware version and sends a key to the site that serves it.
 When a key does not answer here at all - which is what an older key looks
-like - the page says so and goes to apps.crp.to after 5 seconds (with a
-"Stay here" link). No key at all looks the same, which is harmless:
-apps.crp.to sends a newer key straight back here after its handshake, and a
-visitor apps.crp.to has just sent here is never sent back.
+like - the page links to apps.crp.to rather than redirecting, because no key
+at all looks the same.
 
 ## Rebuilding
 
