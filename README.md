@@ -15,10 +15,7 @@ This repository holds build output only.
 Firmware only answers the web app from origins compiled into it
 (`webcryptcheck()`, `fido2/device.cpp`). Newer firmware trusts both sites;
 v3.0.4 and earlier trust only apps.crp.to. After the handshake each site
-reads the firmware version and sends a key to the site that serves it.
-When a key does not answer here at all - which is what an older key looks
-like - the page links to apps.crp.to rather than redirecting, because no key
-at all looks the same.
+reads the firmware version and establishes a session key with the site.
 
 ## Rebuilding
 
@@ -30,10 +27,3 @@ OK_CNAME=apps.onlykey.io bash BUILD.sh 1      # production: no-op console
 node test/version-route.test.js
 # copy docs/ (including CNAME and .nojekyll) to the root of this repository
 ```
-
-## DNS
-
-Production is published from `trustcrypto/apps.onlykey.io`.
-`apps.onlykey.io` needs a CNAME record pointing at `trustcrypto.github.io`
-(DNS only - not proxied - until GitHub has issued the certificate). Then
-enable "Enforce HTTPS" in that repository's Pages settings.
