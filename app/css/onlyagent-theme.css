@@ -1,0 +1,342 @@
+/* ==========================================================================
+   OnlyKey — app design system
+   src/assets/css/onlyagent-theme.css  ·  link LAST in the shells.
+
+   Visual only — no JS/crypto changes.
+
+   Monochrome, to match the OnlyKey wordmark, which is flat black type with a
+   keypad glyph for the O. One accent — white — carries links, focus rings and
+   emphasis. Exactly one hue survives, red, and only for errors: a failed
+   decrypt or a bad signature is the one state a user must not misread, and it
+   is the one place hue earns its keep. Success and warning are carried by a
+   left rule and weight instead.
+
+   The filename still says onlyagent. It is referenced by both HTML shells and
+   by the webpack asset copy, and renaming it buys nothing a comment cannot.
+   ========================================================================== */
+
+:root{
+  --bg:#0a0a0a; --bg-2:#111111; --panel:#151515; --panel-2:#1c1c1c;
+  --line:#2a2a2a; --line-2:#3b3b3b; --text:#f5f5f5; --muted:#9a9a9a;
+  --accent:#ffffff; --accent-2:#b8b8b8; --danger:#ff5f5f; --ok:#ffffff;
+  --radius:16px; --radius-sm:11px; --max:980px;
+  /* Was a teal-to-blue gradient. Kept as a variable because a dozen rules
+     reference it; now a flat white, so a primary button reads as the wordmark
+     inverted rather than as a second brand. */
+  --grad:#ffffff;
+  --on-accent:#0a0a0a;   /* text on a white fill */
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+}
+
+/* ---------- base ---------- */
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;color:var(--text);font-family:var(--sans);line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  /* Two coloured glows became one faint white one: on near-black it reads as a
+     soft vignette rather than as a colour. */
+  background:
+    radial-gradient(1100px 560px at 80% -10%,rgba(255,255,255,.045),transparent 62%),
+    var(--bg);
+  background-attachment:fixed;min-height:100vh;
+}
+a{color:var(--accent);text-decoration:none;transition:.15s}
+a:hover{color:var(--accent-2)}
+/* Links used to be told apart from body text by hue. With both white, prose
+   links need an underline or they vanish. Scoped so nav items, tool cards and
+   buttons - which have their own affordances - stay clean. */
+.oa-main a:not(.btn):not(.oa-tool):not(.oa-brand):not([class*="oa-btn"]),
+.oa-footer a{
+  text-decoration:underline;text-underline-offset:3px;
+  text-decoration-thickness:1px;text-decoration-color:var(--line-2);
+}
+.oa-main a:not(.btn):not(.oa-tool):not(.oa-brand):not([class*="oa-btn"]):hover,
+.oa-footer a:hover{text-decoration-color:var(--accent)}
+h1,h2,h3,h4,h5,h6{margin:0;letter-spacing:-.02em;font-weight:700;line-height:1.18}
+p{margin:0 0 1rem}
+hr{border:0;border-top:1px solid var(--line);margin:28px 0}
+::selection{background:rgba(255,255,255,.22);color:var(--text)}
+font{font-size:inherit!important}
+
+/* ---------- top nav (custom .oa-nav, replaces Bootstrap navbar) ---------- */
+.oa-nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(10px);
+  background:rgba(10,10,10,.82);border-bottom:1px solid var(--line)}
+.oa-nav .inner{max-width:var(--max);margin:0 auto;height:62px;display:flex;
+  align-items:center;justify-content:space-between;padding:0 22px;gap:16px}
+.oa-brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;letter-spacing:-.01em;color:var(--text)}
+.oa-brand:hover{color:var(--text)}
+.oa-brand .oa-dot{
+  /* The glyph that stands in for the O in the OnlyKey wordmark: a keypad of SIX
+     keys, 3 across and 2 down, inside a heavy rounded frame. Measured off
+     OnlyKey_Logo_360x.png rather than eyeballed - the mark is 51x41, so it is
+     wider than tall, the frame ring is 6 units thick, and the keys are 7x7 on a
+     grid at x 11/22/33, y 12/22.
+     Inverted for a dark nav: the frame and keys are white and the well is left
+     transparent, so the nav's blur shows through rather than a flat patch.
+     Inline as a data URI - no new asset, no change to the webpack copy step. */
+  flex:none;width:26px;height:21px;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 51 41'%3E%3Crect x='3' y='3' width='45' height='35' rx='10' fill='none' stroke='%23fff' stroke-width='6'/%3E%3Cg fill='%23fff'%3E%3Crect x='11' y='12' width='7' height='7'/%3E%3Crect x='22' y='12' width='7' height='7'/%3E%3Crect x='33' y='12' width='7' height='7'/%3E%3Crect x='11' y='22' width='7' height='7'/%3E%3Crect x='22' y='22' width='7' height='7'/%3E%3Crect x='33' y='22' width='7' height='7'/%3E%3C/g%3E%3C/svg%3E");
+  background-size:contain;background-repeat:no-repeat;background-position:center;
+}.oa-brand img{height:30px;width:auto;display:block}
+.oa-navlinks{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.oa-navlinks a{color:var(--muted);font-size:14px;font-weight:500;padding:8px 12px;border-radius:9px}
+.oa-navlinks a:hover{color:var(--text);background:var(--panel)}
+.oa-navlinks a.active{color:var(--text);background:var(--panel);border:1px solid var(--line)}
+.oa-navlinks a i{margin-right:6px;color:inherit;opacity:.85}
+.oa-navlinks .sep{width:1px;height:22px;background:var(--line);margin:0 6px}
+@media(max-width:680px){.oa-navlinks a span{display:none}.oa-navlinks a i{margin:0}}
+
+/* ---------- mode selector (inside the Encrypt / Decrypt pages) ----------
+   The header now carries three links; which KIND of encrypt or decrypt is
+   picked here. Rendered by src/plugins/pages/mode-tabs.js as real <a> hrefs
+   to real routes - pages.js swaps the view client-side, so the fields change
+   without a page load, and the tabs still work as plain links without JS.
+
+   Deliberately NOT styled like the header: a segmented control reads as
+   "these are alternatives, pick one", where a row of nav links reads as
+   "these are separate places". The distinction is the whole point of the
+   change. */
+.oa-modes{
+  display:flex;gap:4px;flex-wrap:wrap;
+  background:var(--bg-2);border:1px solid var(--line);
+  border-radius:12px;padding:4px;margin:0 0 26px;
+}
+.oa-modes a{
+  flex:1 1 auto;text-align:center;white-space:nowrap;
+  color:var(--muted);font-size:14px;font-weight:600;letter-spacing:.01em;
+  padding:9px 16px;border-radius:9px;border:1px solid transparent;
+  transition:.15s;
+}
+.oa-modes a:hover{color:var(--text);background:var(--panel)}
+.oa-modes a.active{
+  color:var(--on-accent);background:var(--accent);border-color:var(--accent);
+}
+.oa-modes a.active:hover{color:var(--on-accent);background:var(--accent)}
+.oa-modes a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media(max-width:560px){
+  .oa-modes a{flex:1 1 40%;padding:9px 10px;font-size:13px}
+}
+
+/* ---------- device challenge code ----------
+   Was inline styles carrying a light-theme green on a near-white panel, from
+   before the monochrome pass - unreadable on this background.
+
+   `display:none` belongs HERE, not on the element. The markup used to carry
+   style="display:none", and this app's CSP allows style-src 'self' with
+   nonces and no 'unsafe-inline', so that attribute was refused and the box sat
+   open on every page load, telling the user to press buttons for a request
+   nobody had made. The JS toggle is unaffected either way - CSP does not
+   police CSSOM writes, so element.style.display from onlykey-3rd-party.js
+   still overrides this rule to show the code, and still sets "none" to hide
+   it. The default is simply no longer the markup's job. */
+.oa-challenge{
+  display:none;
+  margin:18px 0;padding:14px 18px;text-align:center;
+  background:var(--panel);border:1px solid var(--line-2);border-radius:var(--radius-sm);
+}
+.oa-challenge-hint{font-size:14px;color:var(--muted)}
+.oa-challenge-code{
+  font-family:var(--mono);font-size:32px;font-weight:700;letter-spacing:10px;
+  color:var(--text);margin-top:6px;
+}
+
+/* legacy bootstrap navbar fallback (in case a page still uses it) */
+.navbar.bg-dark{background:rgba(10,10,10,.82)!important;border-bottom:1px solid var(--line)}
+.navbar .navbar-brand,.navbar a{color:var(--muted)!important}
+.navbar .navbar-brand:hover{color:var(--text)!important}
+.navbar .fa{color:var(--muted)}
+
+/* ---------- layout ---------- */
+.oa-main{max-width:var(--max);margin:0 auto;padding:0 22px 90px}
+.oa-page-head{text-align:center;padding:46px 0 30px}
+.oa-page-head .eyebrow{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;
+  color:var(--text);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.18);
+  padding:6px 13px;border-radius:999px;margin-bottom:16px}
+.oa-page-head h1{font-size:clamp(26px,4.4vw,40px);font-weight:800}
+.oa-page-head p{color:var(--muted);max-width:56ch;margin:14px auto 0;font-size:17px}
+
+/* ---------- card (wraps tool forms + content) ---------- */
+.oa-card,#container.oa-content{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:30px;margin:0 auto;max-width:680px;
+  box-shadow:0 18px 50px rgba(0,0,0,.35);
+}
+#container.oa-content{display:block}
+#container fieldset{background:transparent;border:0;padding:0;margin:0}
+#container h4{font-size:16px;font-weight:600;color:var(--muted);text-align:center;margin:0 auto 22px;max-width:50ch}
+#container h4 font{font-size:16px!important}
+#container h3{font-size:15px;color:var(--text);margin-bottom:10px;font-weight:600}
+#container > div > h1{font-size:18px;color:var(--muted);text-align:center}
+
+/* ---------- form controls ---------- */
+label{display:block;color:var(--text);font-weight:500;font-size:14px;margin:0 0 7px}
+input[type="text"],input[type="email"],input[type="password"],input[type="search"],
+input:not([type]),textarea,select,.form-control{
+  width:100%;background:var(--bg-2)!important;color:var(--text)!important;
+  border:1px solid var(--line)!important;border-radius:var(--radius-sm)!important;
+  padding:13px 15px!important;font-family:var(--sans);font-size:15px;margin-bottom:14px;
+  transition:border-color .18s, box-shadow .18s;
+}
+textarea{min-height:54px;resize:vertical;line-height:1.5}
+#message{min-height:150px}
+input::placeholder,textarea::placeholder{color:var(--muted)!important;opacity:1}
+input:focus,textarea:focus,select:focus,.form-control:focus,input.focus,textarea.focus{
+  outline:none!important;border-color:var(--accent)!important;
+  box-shadow:0 0 0 3px rgba(255,255,255,.14)!important;background:var(--bg-2)!important;color:var(--text)!important;
+}
+select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+  background-position:calc(100% - 20px) 19px,calc(100% - 14px) 19px;background-size:6px 6px,6px 6px;background-repeat:no-repeat;padding-right:38px!important}
+select option{background:var(--panel);color:var(--text)}
+fieldset{border:0;padding:0;margin:0}
+input[readonly]{background:var(--panel-2)!important;color:var(--accent)!important;font-family:var(--mono)}
+
+/* number was missing from the selector list above, so the RSA-slot field on
+   the PQC-PGP views kept the browser's white default - one bright box in the
+   middle of a dark form. */
+input[type="number"]{
+  width:100%;background:var(--bg-2)!important;color:var(--text)!important;
+  border:1px solid var(--line)!important;border-radius:var(--radius-sm)!important;
+  padding:13px 15px!important;font-family:var(--sans);font-size:15px;margin-bottom:14px;
+  transition:border-color .18s, box-shadow .18s;
+}
+input[type="number"]:focus{
+  outline:none!important;border-color:var(--accent)!important;
+  box-shadow:0 0 0 3px rgba(255,255,255,.14)!important;
+}
+
+/* tokenizer.css hard-codes `background-color:white` on the wrapper it builds
+   around the recipient field, so the one control the encrypt page cares most
+   about was the one that did not match. Overridden rather than edited in
+   place: tokenizer.css is vendored. */
+div.tokenizer>div{
+  background-color:var(--bg-2)!important;color:var(--text);
+  border:1px solid var(--line)!important;border-radius:var(--radius-sm);
+  padding:11px 13px;
+}
+div.tokenizer.focused>div{border-color:var(--accent)!important}
+div.tokenizer ul li span{color:var(--text)}
+div.tokenizer .remove-icon{color:var(--muted)}
+
+/* radio groups -> pill segment look */
+#action,form#action{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:18px;color:var(--muted)}
+#action label,center label{display:inline-flex;align-items:center;gap:7px;margin:0;
+  background:var(--panel-2);border:1px solid var(--line);border-radius:999px;padding:8px 14px;color:var(--text);font-size:14px;cursor:pointer}
+input[type="radio"],input[type="checkbox"]{accent-color:var(--accent);width:auto;margin:0}
+center{display:block}
+
+/* file input */
+input[type="file"]{width:100%;color:var(--muted);background:var(--bg-2);border:1px dashed var(--line-2);
+  border-radius:var(--radius-sm);padding:18px;cursor:pointer;margin-bottom:14px}
+input[type="file"]::file-selector-button{background:var(--panel-2);color:var(--text);border:1px solid var(--line);
+  border-radius:9px;padding:9px 15px;margin-right:14px;cursor:pointer;font-family:var(--sans);font-weight:600}
+input[type="file"]::file-selector-button:hover{border-color:var(--accent)}
+.block,.block-inner{background:transparent;border:0;padding:0;margin:0 0 14px}
+.block .block-inner{padding:0}
+.outline{border:0!important}
+#filedetails,#results{color:var(--muted);font-size:14px}
+
+/* ---------- buttons ---------- */
+.btn,button,#onlykey_start,#submit,a.oa-btn{
+  font-family:var(--sans);font-weight:700;font-size:15px;border-radius:var(--radius-sm);
+  padding:13px 20px;cursor:pointer;transition:.15s;border:1px solid transparent;display:inline-flex;
+  align-items:center;justify-content:center;gap:8px;
+}
+/* primary submit / search */
+button[type="submit"],#onlykey_start,#submit,.btn-success,.oa-btn-primary{
+  width:100%;background:var(--grad)!important;color:var(--on-accent)!important;border:0!important;
+  box-shadow:0 10px 26px rgba(0,0,0,.45);margin-top:6px;
+}
+/* A white fill cannot brighten, so hover dims it slightly instead. */
+button[type="submit"]:hover,#onlykey_start:hover,#submit:hover,.btn-success:hover{background:var(--accent-2)!important;transform:translateY(-1px)}
+.btn-secondary,.btn-light,.btn-default{background:var(--panel-2)!important;border:1px solid var(--line)!important;color:var(--text)!important;width:auto}
+.btn-danger{background:var(--danger)!important;color:#1a0606!important;border:0!important}
+.btn-danger:hover{filter:brightness(1.06)}
+/* generic non-action buttons */
+button{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}
+button:hover{border-color:var(--accent)}
+
+/* ---------- home page (.oa-tools grid) ---------- */
+.oa-hero{text-align:center;padding:54px 0 8px}
+.oa-hero h1{font-size:clamp(30px,5.2vw,50px);font-weight:800;max-width:16ch;margin:0 auto}
+/* Was gradient-clipped text. A solid fill would clip to a flat white and look
+   like a bug, so the emphasis is carried by colour weight instead: the rest of
+   the heading sits back, this part is full white. */
+.oa-hero h1{color:var(--muted)}
+.oa-hero h1 .g{color:var(--text)}
+.oa-hero p{color:var(--muted);font-size:18px;max-width:54ch;margin:18px auto 0}
+.oa-tools{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;margin:40px 0}
+@media(max-width:680px){.oa-tools{grid-template-columns:1fr}}
+.oa-tool{display:block;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:26px;transition:.18s;color:var(--text)}
+.oa-tool:hover{border-color:var(--line-2);transform:translateY(-3px);box-shadow:0 18px 40px rgba(0,0,0,.35);color:var(--text)}
+.oa-tool .ic{width:46px;height:46px;border-radius:12px;display:grid;place-items:center;font-size:20px;
+  color:var(--on-accent);background:var(--grad);margin-bottom:16px}
+.oa-tool h3{font-size:19px;margin-bottom:6px}
+.oa-tool p{color:var(--muted);font-size:14.5px;margin:0}
+.oa-cta-row{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:8px}
+/* The hero's CTA row asked for margin-top:26px and its primary button for
+   max-width:260px, both as inline style attributes the CSP refuses (see
+   .oa-challenge). The row was sitting at the 8px default above and the button
+   was running the full width of the row. */
+.oa-hero .oa-cta-row{margin-top:26px}
+.oa-cta-row .oa-btn-primary{max-width:260px}
+
+/* fancy-icons header on tool pages */
+#fancy-icons{margin:8px 0 0;font-size:22px}
+#fancy-icons .fa{color:var(--accent)}
+#fancy-icons .fi-b{color:var(--muted)}
+.app-head img{filter:drop-shadow(0 8px 30px rgba(255,255,255,.14))}
+
+/* console / code (password-generator) */
+pre{background:var(--bg-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:16px;overflow:auto;margin-top:6px}
+pre code,code{color:var(--text);font-family:var(--mono);background:transparent}
+#messages,#header_messages,#terminal_messages{color:var(--accent)}
+.xterm-viewport,.xterm-screen{background:var(--bg-2)!important;border-radius:10px}
+
+/* ---------- modals ---------- */
+.modal-content{background:var(--panel)!important;border:1px solid var(--line)!important;border-radius:var(--radius)!important;color:var(--text)!important;box-shadow:0 24px 70px rgba(0,0,0,.5)}
+.modal-header,.modal-footer{border-color:var(--line)!important}
+.modal-title{color:var(--text)}
+.modal-footer button{width:auto}
+.close{color:var(--muted);text-shadow:none;opacity:.8}
+.close:hover{color:var(--text)}
+
+/* tokenizer chips */
+.tokenfield,.tokenizer{background:var(--bg-2)!important;border:1px solid var(--line)!important;border-radius:var(--radius-sm)!important;padding:6px!important;margin-bottom:14px}
+.token,.tokenfield .token{background:rgba(255,255,255,.10)!important;border:1px solid rgba(255,255,255,.26)!important;color:var(--text)!important;border-radius:8px!important}
+.token .close{color:var(--accent)}
+
+/* alerts */
+/* Success and warning no longer differ by hue, so they differ by rule weight
+   and by how solid the left edge is. Danger keeps red: a failed decrypt or a
+   bad signature is the one state a user must not misread. */
+.alert{border-radius:var(--radius-sm)}
+.alert-success{background:rgba(255,255,255,.055)!important;border:1px solid var(--line)!important;
+  border-left:3px solid var(--accent)!important;color:var(--text)!important;border-radius:var(--radius-sm)}
+.alert-warning{background:rgba(255,255,255,.03)!important;border:1px solid var(--line)!important;
+  border-left:3px dashed var(--muted)!important;color:var(--text)!important;border-radius:var(--radius-sm)}
+.alert-danger{background:rgba(255,95,95,.08)!important;border:1px solid rgba(255,95,95,.32)!important;
+  border-left:3px solid var(--danger)!important;color:var(--text)!important;border-radius:var(--radius-sm)}
+.alert-danger,.text-danger{color:var(--danger)!important}
+
+/* A plain confirmation - the OTP-ready notice on the landing page. It used
+   .text-danger, so a success was painted in the colour this theme reserves
+   for a failed decrypt or a bad signature. */
+.oa-notice{color:var(--text);font-size:19px;font-weight:600;line-height:1.35;margin:0}
+
+/* ---------- footer ---------- */
+.oa-footer{border-top:1px solid var(--line);padding:34px 22px;margin-top:30px}
+.oa-footer .inner{max-width:var(--max);margin:0 auto;display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap;color:var(--muted);font-size:14px}
+/* The link group carried style="display:flex;gap:20px;flex-wrap:wrap" in both
+   shells, which the CSP refuses (see .oa-challenge). It was laying out as a
+   plain block, so the footer links stacked instead of sitting in a row. */
+.oa-footer .oa-footer-links{display:flex;gap:20px;flex-wrap:wrap}
+.oa-footer a{color:var(--muted)}.oa-footer a:hover{color:var(--text)}
+
+/* scrollbar */
+*{scrollbar-color:var(--line) transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px}
+::-webkit-scrollbar-thumb:hover{background:var(--line-2)}
