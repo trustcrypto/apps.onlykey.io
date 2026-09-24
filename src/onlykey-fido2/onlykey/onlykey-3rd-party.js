@@ -1,0 +1,1297 @@
+module.exports = function(imports, onlykeyApi) {
+    /* global TextEncoder */
+    // var $ = require("jquery");
+    var nacl = imports.nacl;
+    var forge = imports.forge;
+    var EventEmitter = require("events").EventEmitter;
+    
+    var console = imports.console;
+
+    var extras = require("./onlykey.extra.js")(imports);
+    // Generated protocol table (libraries/onlykey/protocol): challenge-code
+    // rule, response classifier, key type / field ids.
+    var protocol = require("./protocol.js");
+    var explainDeviceError = require("./device-errors.js").explainDeviceError;
+    var {
+        // wait,
+        async_sha256,
+        hexStrToDec,
+        bytes2string,
+        // noop,
+        // getstringlen,
+        // mkchallenge,
+        bytes2b64,
+        // getOS,
+        // ctap_error_codes,
+        // getAllUrlParams,
+        aesgcm_decrypt,
+        // transit_seal / transit_open are the framed (counter + tag) forms and
+        // are what everything here uses. aesgcm_decrypt is kept for the ONE
+        // call below that runs against a response the device never encrypted.
+        transit_seal,
+        transit_open,
+        transit_framed,
+        transit_select,
+        transit_reset,
+        digestBuff,
+        digestArray,
+        arrayBufToBase64UrlDecode,
+        arrayBufToBase64UrlEncode,
+    } = extras;
+
+    var window = imports.window;
+
+    var OKCMD = {
+        OKCONNECT: 228
+    };
+
+    var KEYTYPE = {
+        NACL: 0,
+        P256R1: 1, //encrypt/decrypt
+        P256K1: 2, //sign/verify
+        CURVE25519: 3
+    };
+
+    // 3 and 4 (DERIVE_*_REQ_PRESS) were removed from the firmware and the
+    // numbers are burned, not reused - sending either now gets
+    // CTAP2_ERR_EXTENSION_NOT_SUPPORTED rather than being reinterpreted.
+    //
+    // The `press_required` argument these mapped to is now IGNORED, and kept
+    // only so existing callers still parse. Presence is decided by the device
+    // from what is being asked for: deriving a public key never prompts,
+    // deriving a shared secret always does, with no setting to turn it off.
+    // The suffix had also quietly become a second key domain (the firmware set
+    // additional_data[0] = 1 for it, changing the HKDF salt), which is how
+    // vault.js ended up fetching its public key in one domain and doing its
+    // ECDH in the other. One label now means one key.
+    var KEYACTION = {
+        DERIVE_PUBLIC_KEY: 1,
+        DERIVE_SHARED_SECRET: 2
+    };
+
+    // Uint8Array.from() is NOT a string encoder. Given a string it treats it as
+    // an iterable of characters and coerces each with Number(), which is NaN
+    // for any letter and stores as 0 - so every passphrase collapsed to a run
+    // of zero bytes whose only distinguishing feature was its LENGTH, and two
+    // different passphrases of equal length derived the SAME key. Confirmed
+    // three ways (language level, Node shim against the device, and the real
+    // browser page): "spike-label" and "other-label" produced an identical
+    // derived key, while a different-length control differed.
+    //
+    // password-generator.js and vault.js both pass $("#phrase").val() straight
+    // in, so this was directly user-facing. Encoding the text properly changes
+    // every previously derived key; the maintainer has confirmed that is
+    // acceptable because nothing depends on those keys yet.
+    function derivationInputBytes(additional_d) {
+        if (typeof additional_d === 'string') return new TextEncoder().encode(additional_d);
+        return Uint8Array.from(additional_d);
+    }
+
+    function decode_key(b64_key) {
+        var key = b64_key.split(".");
+
+        if (key.length == 2) {
+            return Uint8Array.from([].concat([0x04], arrayBufToBase64UrlDecode(key[0]), arrayBufToBase64UrlDecode(key[1])));
+        }
+        else {
+            return arrayBufToBase64UrlDecode(b64_key);
+        }
+    }
+
+    function encode_key(uint8array_key) {
+        if (uint8array_key.length == 32) {
+            return arrayBufToBase64UrlEncode(uint8array_key);
+        }
+        else if (uint8array_key.length == 65) {
+            if (uint8array_key[0] == 0x04)
+                return arrayBufToBase64UrlEncode(uint8array_key.slice(1, 33)) + "." + arrayBufToBase64UrlEncode(uint8array_key.slice(33, 66));
+
+        }
+        throw "Unknown Key Type to Encode";
+    }
+
+    function build_AESGCM(raw_secret) {
+        return new Promise(async resolve => {
+            var derivedKey = await window.crypto.subtle.importKey('raw', Uint8Array.from(raw_secret), { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+            resolve(await window.crypto.subtle.exportKey('jwk', derivedKey).then(({ k }) => k));
+        });
+    }
+
+    function EPUB_TO_ONLYKEY_ECDH_P256(ePub, callback) {
+        var xdecoded = arrayBufToBase64UrlDecode(ePub.split(".")[0]);
+        var ydecoded = arrayBufToBase64UrlDecode(ePub.split(".")[1]);
+        
+        var publicKeyRawBuffer = Uint8Array.from([].concat(Array.from(xdecoded)).concat(Array.from(ydecoded)).concat([4]));
+        
+        if (callback)
+            callback(publicKeyRawBuffer);
+            
+        return publicKeyRawBuffer;
+        /*
+        var publicKeyRawBuffer = new Uint8Array(65);
+        var h = -1;
+        for (var i in xdecoded) {
+            h++;
+            publicKeyRawBuffer[h] = xdecoded[i];
+        }
+        for (var j in ydecoded) {
+            h++;
+            publicKeyRawBuffer[h] = ydecoded[j];
+        }
+
+        if (publicKeyRawBuffer[0] == 0) {
+            publicKeyRawBuffer = Array.from(publicKeyRawBuffer)
+            publicKeyRawBuffer.unshift()
+            publicKeyRawBuffer = Uint8Array.from(publicKeyRawBuffer);
+        }
+        if (callback)
+            callback(publicKeyRawBuffer)
+
+        return publicKeyRawBuffer;
+        */
+    }
+
+    async function ONLYKEY_ECDH_P256_to_EPUB(publicKeyRawBuffer, callback) {
+        //https://stackoverflow.com/questions/56846930/how-to-convert-raw-representations-of-ecdh-key-pair-into-a-json-web-key
+
+        //
+        var orig_publicKeyRawBuffer = Uint8Array.from(publicKeyRawBuffer);
+
+        //console.log("publicKeyRawBuffer  B", publicKeyRawBuffer)
+        // publicKeyRawBuffer = Array.from(publicKeyRawBuffer)
+        // publicKeyRawBuffer.unshift(publicKeyRawBuffer.pop());
+        // publicKeyRawBuffer = Uint8Array.from(publicKeyRawBuffer)
+
+        //console.log("publicKeyRawBuffer  F", publicKeyRawBuffer)
+
+        if (false) {
+            var $importedPubKey = await imports.window.crypto.subtle.importKey(
+                'raw', orig_publicKeyRawBuffer, {
+                    name: 'ECDH',
+                    namedCurve: 'P-256'
+                },
+                true, []
+            ).catch(function(err) {
+                console.error(err);
+            }).then(function(importedPubKey) {
+                exportKey(importedPubKey)
+            });
+        }
+        else {
+            var x = publicKeyRawBuffer.slice(1, 33);
+            var y = publicKeyRawBuffer.slice(33, 66);
+
+            imports.window.crypto.subtle.importKey(
+                'jwk', {
+                    kty: "EC",
+                    crv: "P-256",
+                    x: arrayBufToBase64UrlEncode(x),
+                    y: arrayBufToBase64UrlEncode(y)
+                }, {
+                    name: 'ECDH',
+                    namedCurve: 'P-256'
+                },
+                true, []
+            ).catch(function(err) {
+                console.error(err);
+            }).then(function(importedPubKey) {
+                if (importedPubKey)
+                    exportKey(importedPubKey)
+            });
+        }
+
+        function exportKey(importedPubKey) {
+
+            window.crypto.subtle.exportKey(
+                    "jwk", //can be "jwk" (public or private), "raw" (public only), "spki" (public only), or "pkcs8" (private only)
+                    importedPubKey //can be a publicKey or privateKey, as long as extractable was true
+                )
+                .then(function(keydata) {
+
+                    var OK_SEA_epub = keydata.x + '.' + keydata.y;
+
+                    if (callback)
+                        callback(OK_SEA_epub);
+
+                })
+                .catch(function(err) {
+                    console.error(err);
+                });
+
+        }
+
+    }
+
+    function onlykey() {
+
+        var api = new EventEmitter();
+
+        var appKey;
+
+        api.connect = async function(cb) {
+            var delay = 0;
+
+            console.log("-------------------------------------------");
+            // msg("Requesting OnlyKey Secure Connection (" + getOS() + ")");
+            api.emit("status", "Requesting OnlyKey Secure Connection");
+
+            var cmd = OKCMD.OKCONNECT;
+
+            var message = [255, 255, 255, 255, OKCMD.OKCONNECT]; //Add header and message type
+            var currentEpochTime = Math.round(new Date().getTime() / 1000.0).toString(16);
+            var timePart = currentEpochTime.match(/.{2}/g).map(hexStrToDec);
+            Array.prototype.push.apply(message, timePart);
+            appKey = nacl.box.keyPair();
+            Array.prototype.push.apply(message, appKey.publicKey);
+            var env = [onlykeyApi.browser.charCodeAt(0), onlykeyApi.os.charCodeAt(0)];
+            Array.prototype.push.apply(message, env);
+            var encryptedkeyHandle = Uint8Array.from(message); // Not encrypted as this is the initial key exchange
+
+            var enc_resp = 1;
+            await onlykeyApi.ctaphid_via_webauthn(cmd, null, null, null, encryptedkeyHandle, 6000).then(async(response) => {
+
+                if (!response.data) {
+                    // msg("Problem setting time on onlykey");
+                    api.emit("status", "Problem setting time on onlykey");
+                    return;
+                }
+                response = response.data;
+
+                var okPub = response.slice(0, 32);
+                
+                var encrypted_response = false;
+                if (enc_resp == 1) {
+                    // Decrypt with transit_key
+                    var transit_key = nacl.box.before(Uint8Array.from(okPub), appKey.secretKey);
+                    transit_key = await digestBuff(Uint8Array.from(transit_key)); //AES256 key sha256 hash of shared secret
+                    var encrypted = response.slice(32, response.length);
+                    encrypted_response = await aesgcm_decrypt(encrypted, transit_key);
+                }
+                
+                //   transit_key = await digestBuff(Uint8Array.from(transit_key)); //AES256 key sha256 hash of shared secret
+                //   var encrypted  = response.slice(32, response.length);
+                //   onlykey_api.FWversion = bytes2string(response.slice(32+8, 32+20));
+                //   response = await aesgcm_decrypt(encrypted, transit_key);
+                //   onlykey_api.OKversion = response[32+19] == 99 ? 'Color' : 'Go';
+
+                var FWversion = bytes2string(response.slice(32 + 8, 32 + 19));
+                var OKversion = response[32 + 19] == 99 ? 'Color' : 'Go';
+                var sharedsec = nacl.box.before(Uint8Array.from(okPub), appKey.secretKey);
+                // This response is NOT encrypted - a plain OKCONNECT goes out
+                // with opt3 = 0 - which is exactly why the version can be read
+                // here, before any framing has been chosen. (The aesgcm_decrypt
+                // above hashes an already-hashed key and decrypts cleartext; it
+                // has never produced anything anyone uses. Left alone rather
+                // than moved to transit_open(), which would refuse it for having
+                // no tag.)
+                transit_select(FWversion);
+
+                //msg("message -> " + message)
+                // msg("OnlyKey " + OKversion + " " + FWversion + " connection established\n");
+                api.emit("status", "OnlyKey: Connection Established, Hardware "+OKversion+", Firmware " + FWversion + ", Time Set!");
+
+                async_sha256(sharedsec).then((key) => {
+                    if (typeof cb === 'function') cb(null);
+                });
+            });
+
+        }
+
+        api.derive_public_key = async function(additional_d, keytype, press_required, cb) {
+
+            console.log("-------------------------------------------");
+            // msg("Requesting OnlyKey Derive Public Key");
+            api.emit("status", "OnlyKey: Requesting Derived Public Key");
+
+            var cmd = OKCMD.OKCONNECT;
+            //Add header and message type
+            var message = [255, 255, 255, 255, OKCMD.OKCONNECT];
+
+            //Add current epoch time
+            var currentEpochTime = Math.round(new Date().getTime() / 1000.0).toString(16);
+            var timePart = currentEpochTime.match(/.{2}/g).map(hexStrToDec);
+            Array.prototype.push.apply(message, timePart);
+
+            //Add transit pubkey
+            appKey = nacl.box.keyPair();
+            Array.prototype.push.apply(message, appKey.publicKey);
+
+            //Add Browser and OS codes
+            var env = [onlykeyApi.browser.charCodeAt(0), onlykeyApi.os.charCodeAt(0)];
+            Array.prototype.push.apply(message, env);
+
+            //Add additional data for key derivation
+            var dataHash;
+            if (!additional_d) {
+                // SHA256 hash of empty buffer
+                dataHash = await digestArray(Uint8Array.from(new Uint8Array(32)));
+            }
+            else {
+                // SHA256 hash of input data
+                dataHash = await digestArray(derivationInputBytes(additional_d)); //sha256 = 32 bytes
+            }
+            Array.prototype.push.apply(message, dataHash);
+
+            var keyAction = KEYACTION.DERIVE_PUBLIC_KEY;   // press_required ignored, see KEYACTION
+
+            var enc_resp = 1;
+            await onlykeyApi.ctaphid_via_webauthn(cmd, keyAction, keytype, enc_resp, message, 60000).then(async(response) => {
+
+                if (!response.data) {
+                    // msg("Problem setting time on onlykey");
+                    api.emit("status", "OnlyKey: Problem Requesting Derived Public Key");
+                    // api.emit("error", "");
+                    return;
+                }
+                response = response.data;
+
+                // Public ECC key will be an uncompressed ECC key, 65 bytes for P256, 32 bytes for NACL/CURVE25519 
+                var sharedPub;
+                var okPub = response.slice(0, 32);
+
+                var encrypted_response = false;
+                if (enc_resp == 1) {
+                    // Decrypt with transit_key
+                    var transit_key = nacl.box.before(Uint8Array.from(okPub), appKey.secretKey);
+                    transit_key = Uint8Array.from(transit_key); //await digestBuff(Uint8Array.from(transit_key)); //AES256 key sha256 hash of shared secret
+                    // This request was an OKCONNECT, so the device has REPLACED
+                    // its transit key and restarted its counters. Adopt both, or
+                    // the next composite request goes out under the old key and
+                    // the wrong counter. The X-Wing path below already did this;
+                    // it is the same bug here, and the tag now makes it fatal
+                    // instead of silent.
+                    onlykeyApi.sharedsec = transit_key;
+                    transit_reset();
+                    var encrypted = response.slice(32, response.length);
+                    encrypted_response = await transit_open(encrypted, transit_key);
+                }
+
+                // OnlyKey version and model info
+                var FWversion = bytes2string(response.slice(8, 19));
+                var OKversion = response[19] == 99 ? 'Color' : 'Go';
+
+                // Public ECC key will be an uncompressed ECC key, 65 bytes for P256, 32 bytes for NACL/CURVE25519 
+                if (keytype == KEYTYPE.CURVE25519 || keytype == KEYTYPE.NACL) {
+                    sharedPub = encrypted_response.slice(encrypted_response.length - (32), encrypted_response.length);
+                }
+                else {
+                    sharedPub = encrypted_response.slice(encrypted_response.length - (65), encrypted_response.length);
+                }
+                // msg("OnlyKey Derive Public Key Complete");
+
+                api.emit("status", "OnlyKey: Requested Derived Public Key Complete");
+
+                if (keytype == KEYTYPE.P256R1) { //KEYTYPE_P256R1
+                    ONLYKEY_ECDH_P256_to_EPUB(sharedPub, function(epub) {
+                        if (typeof cb === 'function') cb(null, epub);
+                    })
+                }
+                else if (keytype == KEYTYPE.CURVE25519 || keytype == KEYTYPE.NACL) { //KEYTYPE_CURVE25519
+                    // var eccKey_Pub = elliptic_curve25519.keyFromPublic(sharedPub).getPublic().encode("hex");
+                    if (typeof cb === 'function') cb(null, encode_key(sharedPub));
+                }
+
+            });
+            
+        }
+
+        api.derive_shared_secret = async function(additional_d, pubkey, keytype, press_required, cb) {
+            
+            if(keytype == KEYTYPE.P256R1 || keytype == KEYTYPE.P256K1)
+                pubkey = EPUB_TO_ONLYKEY_ECDH_P256(pubkey);
+            if (keytype == KEYTYPE.CURVE25519 || keytype == KEYTYPE.NACL) 
+                pubkey = decode_key(pubkey);
+            console.log("-------------------------------------------");
+            // msg("Requesting OnlyKey Shared Secret");
+            api.emit("status", "OnlyKey: Requesting Shared Secret");
+
+            var cmd = OKCMD.OKCONNECT;
+            //Add header and message type
+            var message = [255, 255, 255, 255, OKCMD.OKCONNECT];
+
+            //Add current epoch time
+            var currentEpochTime = Math.round(new Date().getTime() / 1000.0).toString(16);
+            var timePart = currentEpochTime.match(/.{2}/g).map(hexStrToDec);
+            Array.prototype.push.apply(message, timePart);
+
+            //Add transit pubkey
+            appKey = nacl.box.keyPair();
+            Array.prototype.push.apply(message, appKey.publicKey);
+
+            //Add Browser and OS codes
+            var env = [onlykeyApi.browser.charCodeAt(0), onlykeyApi.os.charCodeAt(0)];
+            Array.prototype.push.apply(message, env);
+
+            var dataHash;
+            //Add additional data for key derivation
+            if (!additional_d) {
+                // SHA256 hash of empty buffer
+                dataHash = await digestArray(Uint8Array.from(new Uint8Array(32)));
+            }
+            else {
+                // SHA256 hash of input data
+                dataHash = await digestArray(derivationInputBytes(additional_d));
+            }
+            Array.prototype.push.apply(message, dataHash);
+            //msg("additional data hash -> " + dataHash)
+
+            //Add input public key for shared secret computation 
+            Array.prototype.push.apply(message, pubkey);
+            //msg("input pubkey -> " + pubkey)
+            //msg("full message -> " + message)
+
+            var keyAction = KEYACTION.DERIVE_SHARED_SECRET; // press_required ignored; the device always prompts
+
+            var enc_resp = 1;
+            await onlykeyApi.ctaphid_via_webauthn(cmd, keyAction, keytype, enc_resp, message, 60000).then(async(response) => {
+
+                if (!response.data) {
+                    // msg("Problem setting time on onlykey");
+                    api.emit("status", "OnlyKey: Problem Requesting Shared Secret");
+                    return;
+                }
+                response = response.data;
+
+                var sharedPub;
+                var okPub = response.slice(0, 32);
+
+                var encrypted_response = false;
+                if (enc_resp == 1) {
+                    // Decrypt with transit_key
+                    var transit_key = nacl.box.before(Uint8Array.from(okPub), appKey.secretKey);
+                    transit_key = Uint8Array.from(transit_key); //await digestBuff(Uint8Array.from(transit_key)); //AES256 key sha256 hash of shared secret
+                    onlykeyApi.sharedsec = transit_key; // see derive_public_key
+                    transit_reset();
+                    var encrypted = response.slice(32, response.length);
+                    encrypted_response = await transit_open(encrypted, transit_key);
+                }
+
+                var FWversion = bytes2string(encrypted_response.slice(8, 19));
+                var OKversion = encrypted_response[19] == 99 ? 'Color' : 'Go';
+
+                // Public ECC key will be an uncompressed ECC key, 65 bytes for P256, 32 bytes for NACL/CURVE25519 
+                if (keytype == KEYTYPE.NACL || keytype == KEYTYPE.CURVE25519) {
+                    sharedPub = encrypted_response.slice(encrypted_response.length - (32 + 32), encrypted_response.length - 32);
+                }
+                else {
+                    sharedPub = encrypted_response.slice(encrypted_response.length - (32 + 65), encrypted_response.length - 32);
+                }
+                //Private ECC key will be 32 bytes for all supported ECC key types
+                var sharedsec = encrypted_response.slice(encrypted_response.length - 32, encrypted_response.length);
+
+                // msg("OnlyKey Shared Secret Completed\n");
+                api.emit("status", "OnlyKey: Shared Secret Complete");
+
+                var _k; //key to export in AESGCM hex;
+
+                if (keytype == KEYTYPE.P256R1 || keytype == KEYTYPE.P256K1) {
+
+                    _k = await build_AESGCM(sharedsec);
+
+                    // var ssHex = hex_encode(sharedsec)
+
+                    if (typeof cb === 'function') cb(null, _k, encode_key(sharedPub));
+                }
+                else if (keytype == KEYTYPE.CURVE25519 || keytype == KEYTYPE.NACL) {
+                    // var ssHex = hex_encode(sharedsec)
+                    _k = await build_AESGCM(sharedsec);
+                    if (typeof cb === 'function') cb(null, _k, encode_key(sharedPub));
+                }
+
+            });
+        };
+        
+        // ---- Derived (label-based) X-Wing split custody ---------------------
+        //
+        // The device half of age-derive.js's encrypt/decrypt. sk_X (X25519)
+        // never leaves the device: it returns pk_X plus the ML-KEM-768 seed,
+        // and the host expands the seed and does the post-quantum half itself.
+        // Same derivation the CLI performs (age-plugin-onlykey --derived,
+        // python-onlykey's derived_xwing.py), so a label used on one side
+        // produces the same key on the other - that equivalence is what
+        // TC-18/TC-19 test.
+        //
+        // Ported from onlykey-testing's lib/fido2/client.js deriveXwing(),
+        // which is the same protocol proven against real hardware (TC-09/10),
+        // rather than re-derived from the firmware a second time.
+        //
+        // Two wire details are easy to get wrong and are load-bearing:
+        //
+        //   * opt2 is 5, not KEYTYPE_XWING's 6. ok_extension.cpp does `opt2++`
+        //     before comparing, so the value on the wire is one less.
+        //   * the label is hashed to 32 bytes exactly like derive_public_key
+        //     hashes its input, and the CLI hashes the same way
+        //     (sha256(label)). Sending raw label bytes would derive a
+        //     different key with no error, surfacing much later as "no
+        //     identity matched any of the recipients".
+        var XWING_WIRE_KEYTYPE = 5;
+        var XWING_PK = 1216;   // okcrypto.h XWING_PK_SIZE
+        var XWING_CT = 1120;   // okcrypto.h XWING_CT_SIZE
+        var XWING_SS = 32;     // okcrypto.h XWING_SS_SIZE
+        // Slot 128 - the web AND agent derivation key. Named for both because it
+        // serves both: this app over FIDO2, and local tools over USB
+        // (onlykey-agent, python-onlykey, age). Deliberately the accessible tier -
+        // reachable by software with nobody in front of it, and correspondingly
+        // less protected than a stored slot.
+        var RESERVED_KEY_WEB_AGENT_DERIVATION = 128; // okcore.h
+
+        // Response layout, confirmed live rather than only read off the
+        // firmware:
+        //   [ device transit pubkey(32) | status string, NUL-terminated
+        //     ("UNLOCKEDvX.Y.Z-xxxx\0", variable length) | payload(64) ]
+        // With enc_resp set, everything after the transit pubkey is AES-GCM
+        // encrypted as one blob ("encrypt everything except transit public" -
+        // ok_extension.cpp forces any truthy opt3 to that mode). The status
+        // string's length varies with the firmware version, so the NUL is
+        // located rather than a fixed offset assumed.
+        async function xwing_derive(label) {
+            var message = [255, 255, 255, 255, OKCMD.OKCONNECT];
+
+            var currentEpochTime = Math.round(new Date().getTime() / 1000.0).toString(16);
+            Array.prototype.push.apply(message, currentEpochTime.match(/.{2}/g).map(hexStrToDec));
+
+            appKey = nacl.box.keyPair();
+            Array.prototype.push.apply(message, appKey.publicKey);
+
+            var env = [onlykeyApi.browser.charCodeAt(0), onlykeyApi.os.charCodeAt(0)];
+            Array.prototype.push.apply(message, env);
+
+            var labelHash = await digestArray(derivationInputBytes(label));
+            Array.prototype.push.apply(message, labelHash);
+
+            // Public-key derivation only. DERIVE_SHAREDSEC is no longer served
+            // on this path at all: decapsulation now needs the whole 1120-byte
+            // X-Wing ciphertext on the device, which does not fit this
+            // single-shot client_handle request, and the device must hold the
+            // ML-KEM half rather than hand the host a seed to expand. See
+            // derive_xwing_decap() below for where it went.
+            //
+            // Nothing here is gated, so there is no challenge code to
+            // precompute and display: a public key is public data and the
+            // caller cannot turn it into a secret. The gate lives on the
+            // decapsulation path - the one that decrypts.
+            var keyAction = KEYACTION.DERIVE_PUBLIC_KEY;
+
+            var enc_resp = 1;
+            var response = await onlykeyApi.ctaphid_via_webauthn(
+                OKCMD.OKCONNECT, keyAction, XWING_WIRE_KEYTYPE, enc_resp, message, 60000
+            );
+            if (!response || !response.data) {
+                throw new Error(response && response.error ? response.error : 'no response from OnlyKey');
+            }
+            var data = response.data;
+
+            var okPub = data.slice(0, 32);
+            var transit_key = Uint8Array.from(nacl.box.before(Uint8Array.from(okPub), appKey.secretKey));
+
+            // This request was an OKCONNECT, so the device has just REPLACED its
+            // transit_key with one derived from the keypair generated above.
+            // transit_key is a single global on the device - the last OKCONNECT
+            // always wins - while onlykeyApi.sharedsec still held the key from
+            // the api's own connect at page load.
+            //
+            // Everything composite goes out under onlykeyApi.sharedsec
+            // (prime_composite -> aesgcm_encrypt), so after any derive those two
+            // disagreed and the device decrypted the OKDECRYPT chunks with the
+            // wrong key. It does not fail loudly: the chunk count is right, the
+            // request reassembles to 1152 bytes of garbage, the device
+            // decapsulates that garbage and hands back a perfectly well-formed
+            // 32-byte secret which simply is not the right one. age reports
+            // "invalid tag" - measured on hardware 2026-09-15, after a correct
+            // derive, a correct encrypt and a confirmed press on the key.
+            //
+            // Adopt the key the device now actually holds - and its counter
+            // space, which the device restarted along with the key.
+            onlykeyApi.sharedsec = transit_key;
+            transit_reset();
+
+            // Reassemble the CIPHERTEXT first, decrypt once at the end.
+            //
+            // Everything after the transit pubkey is ONE AES-GCM blob that the
+            // device encrypted in a single call over the whole staged response
+            // (store_FIDO_response(), encrypt == 2). The chunk boundaries are a
+            // transport artefact and mean nothing to the cipher.
+            //
+            // Decrypting the first chunk and then appending the polled chunks
+            // raw - which is what this did - splices plaintext onto ciphertext.
+            // It looked plausible because aesgcm_decrypt() runs with
+            // tagLength 0, so a prefix DOES decrypt correctly on its own and
+            // the first 446 bytes of the recipient were right. The remaining
+            // 770 were ciphertext. agePqc rejected the result with "ML-KEM.
+            // encapsulate: wrong publicKey modulus" - measured on hardware
+            // 2026-09-15, the first symptom of this that was visible at all.
+            var cipher = Array.from(data).slice(32);
+            if (cipher.length >= MAX_LARGE_RESP_CHUNK - 32) {
+                // untilShort: the host cannot compute the total. The staged
+                // response is [ transit pubkey(32) | status field | pk(1216) ]
+                // and the status field's width is sizeof(UNLOCKED)+1 - a
+                // firmware build constant that changes with the version string.
+                var rest = await poll_for_response(0, null, true);
+                cipher = cipher.concat(Array.from(rest));
+            }
+
+            var tail = Array.from(await transit_open(cipher, transit_key));
+
+            // Take the recipient as the LAST XWING_PK bytes rather than
+            // everything after the first NUL. The status field is a fixed-width
+            // slot, NOT a tight string: the firmware copies sizeof(UNLOCKED)+1
+            // bytes into it, so short version strings leave trailing padding
+            // between the NUL and the recipient. Slicing at nulAt+1 prepended
+            // that padding to pk_M and corrupted it.
+            if (tail.length < XWING_PK) {
+                throw new Error('X-Wing derive: short response, got ' + tail.length +
+                                ' bytes, need at least ' + XWING_PK);
+            }
+            var nulAt = tail.indexOf(0);
+            if (nulAt === -1) throw new Error('X-Wing derive: no NUL-terminated status string in response');
+            var head = Uint8Array.from(tail.slice(tail.length - XWING_PK));
+
+            // The recipient is XWING_PK (1216) bytes - far past what one
+            // WebAuthn assertion carries - so the firmware stages it in
+            // large_resp_buffer and serves it in MAX_LARGE_RESP_CHUNK pieces.
+            // Whatever rode along with this first response is its head; the
+            // rest is polled exactly as an ML-DSA-65 signature is.
+            //
+            // It used to be 64 bytes inline: [ pk_X(32) | mlkem_seed(32) ].
+            // The seed is private key material - it yields sk_M - so that was
+            // a private key returned in answer to a request for a public one.
+            // ML-KEM has no short public key (the only 32-byte value that
+            // reproduces pk_M also reproduces sk_M), so the public key itself
+            // has to be what crosses the wire.
+            // head is already exactly XWING_PK bytes: the ciphertext was
+            // reassembled and decrypted above, and the recipient taken off the
+            // end of it.
+            return {
+                recipient: head,
+                status: bytes2string(tail.slice(0, nulAt)),
+            };
+        }
+
+        // cb(error, recipient) - the full 1216-byte X-Wing public key, ready
+        // for agePqc.xwingEncapsHost(). age-derive.js no longer builds it from
+        // halves, because the device no longer hands out the ML-KEM half's seed.
+        api.derive_xwing_recipient = async function(label, cb) {
+            api.emit("status", "OnlyKey: Requesting Derived X-Wing Recipient");
+            try {
+                var r = await xwing_derive(label);
+                api.emit("status", "OnlyKey: Derived X-Wing Recipient Complete");
+                if (typeof cb === 'function') cb(null, r.recipient);
+            }
+            catch (e) {
+                api.emit("status", "OnlyKey: Problem Requesting Derived X-Wing Recipient");
+                if (typeof cb === 'function') cb(e.message || e);
+            }
+        };
+
+        // cb(error, ss) - the 32-byte X-Wing shared secret, fully decapsulated
+        // on the device.
+        //
+        // This no longer rides the DERIVE_* extension. It is a chunked
+        // OKDECRYPT to slot RESERVED_KEY_WEB_AGENT_DERIVATION carrying
+        // [ label32 | ct(1120) ] - the same tunnel composite_decrypt uses -
+        // because the whole X-Wing ciphertext has to reach the device now.
+        // Previously the host sent only ct_X (32 bytes), got back ss_X plus
+        // the ML-KEM seed, and finished the ML-KEM half itself; ct_M never
+        // reached the device and the seed always reached the host. Both are
+        // reversed, so the derived path custodies its whole key exactly as the
+        // stored path does.
+        //
+        // The confirmation is the device's, not ours: the firmware computes
+        // the challenge digits over the reassembled label and ciphertext and
+        // floors at a button press for a shared secret whatever field 30 says.
+        // The code IS precomputed here again - see emit_derive_challenge() and
+        // the note at its call site below. What was wrong with the old one was
+        // the preimage, not the idea.
+
+        /** The three buttons the device is waiting for, or [] when this host
+         *  cannot know them. `req` is the reassembled request the device hashes:
+         *  [label32 | ct1120] for a derived decapsulation. */
+        async function emit_derive_challenge(req) {
+            try {
+                // Six buttons unless we positively know otherwise, which is
+                // also what python-onlykey's challenge_code() does (its `duo`
+                // argument defaults to False).
+                //
+                // onlykeyApi.OKversion is NOT usable for this. It comes from
+                //     OKversion = response[32+19] == 99 ? 'Color' : 'Go'
+                // and UNLOCKED is "UNLOCKED" OKversion - "UNLOCKEDv3.0.5-test",
+                // exactly 19 characters - so index 19 of the status field is its
+                // NUL terminator, not a hardware byte. Every Color reports
+                // itself as 'Go'. Gating the code on that string meant the box
+                // stayed empty on the very hardware it is for - measured
+                // 2026-09-16. The detection wants fixing at the protocol level,
+                // not worked around here.
+                var inner = await digestArray(Uint8Array.from(req));
+                var outer = await digestArray(Uint8Array.from(inner));
+                api.emit("challenge", [
+                    (outer[0]  % 6) + 1,
+                    (outer[15] % 6) + 1,
+                    (outer[31] % 6) + 1
+                ]);
+            } catch (e) {
+                // Never let the display stop the operation: the key still shows
+                // its own prompt, and a button press works in the other modes.
+                api.emit("challenge", []);
+            }
+        }
+
+        api.derive_xwing_decap = async function(label, ciphertext, cb) {
+            api.emit("status", "OnlyKey: Requesting Derived X-Wing Decapsulation - confirm on the device");
+            try {
+                if (!ciphertext || ciphertext.length !== XWING_CT) {
+                    throw new Error('X-Wing ct must be ' + XWING_CT + ' bytes, got ' + (ciphertext ? ciphertext.length : 0));
+                }
+                var labelHash = await digestArray(derivationInputBytes(label));
+                var payload = new Uint8Array(32 + XWING_CT);
+                payload.set(Uint8Array.from(labelHash), 0);
+                payload.set(Uint8Array.from(ciphertext), 32);
+
+                // Show the challenge digits again, computed the way the device
+                // computes them this time.
+                //
+                // Field 30 (web_agent_derive_mode) has three settings, and 0 -
+                // challenge code - is one of them. In that mode the key blinks
+                // and waits for three specific buttons, and the host is the only
+                // thing that can tell the user which. The old precomputation was
+                // removed rather than corrected because it hashed
+                // [keytype | label32 | ct_X32], which stopped being what the
+                // firmware hashes; with nothing in its place the page printed
+                // "press these in order:" followed by an empty box, and a press
+                // on a key in challenge mode gets
+                //
+                //     Error incorrect challenge was entered
+                //
+                // - measured on hardware 2026-09-16.
+                //
+                // The device's derivation, from okcrypto.cpp and
+                // okcore_prime_user_confirmation():
+                //
+                //     inner = SHA256(derive_label(32) || large_buffer(1120))
+                //     outer = SHA256(inner)
+                //     button_n = (outer[{0,15,31}] % 6) + 1
+                //
+                // `payload` IS [label32 | ct1120], so it is the inner hash's
+                // input exactly, and the second hash is the one
+                // okcore_prime_user_confirmation() applies to whatever it is
+                // primed with. Two hashes, not one - that is easy to get wrong
+                // by reading only the call site.
+                //
+                // The % 6 is the six-button layout. OnlyKey DUO uses % 3 and
+                // this library has no reliable way to detect one, so it shows
+                // the six-button code unconditionally - the same default
+                // python-onlykey ships. See emit_derive_challenge().
+                await emit_derive_challenge(payload);
+
+                await prime_composite(OKDECRYPT, RESERVED_KEY_WEB_AGENT_DERIVATION, payload);
+                var ss = await poll_for_response(transit_framed(XWING_SS));
+
+                // The shared secret comes back TRANSIT-ENCRYPTED and has to be
+                // decrypted here.
+                //
+                // okcrypto.cpp returns it with
+                //   send_transport_response(ss, XWING_SS_SIZE, true, true)
+                // and that `true` only bites on this transport:
+                // send_transport_response() ignores the flag on the raw-HID
+                // branch (it memcpys straight into resp_buffer) and honours it
+                // on the WebAuthn branch, where store_FIDO_response() AES-GCMs
+                // the whole 32 bytes under the transit key. So the CLI's
+                // derive_decaps(), which uses the bytes raw, is right to - and
+                // this path was wrong to.
+                //
+                // Every okpqc composite return passes false instead
+                // (okpqc.cpp:251 X25519_SS, :262 MLKEM_SS), which is why
+                // composite_decrypt() can use its poll result directly and why
+                // copying that shape here produced a plausible-looking 32 bytes
+                // that were simply ciphertext. age reported it as "invalid
+                // tag" - measured on hardware 2026-09-15, after the device had
+                // decapsulated correctly and the user had confirmed on the key.
+                //
+                // Decrypting host-side rather than dropping the firmware's
+                // encryption keeps the secret covered in transit and leaves the
+                // CLI path untouched.
+                ss = await transit_open(Array.from(ss), onlykeyApi.sharedsec);
+                if (!ss || ss.length !== XWING_SS) {
+                    throw new Error('X-Wing decaps: got ' + (ss ? ss.length : 0) +
+                                    ' bytes after transit decrypt, expected ' + XWING_SS);
+                }
+                api.emit("status", "OnlyKey: Derived X-Wing Decapsulation Complete");
+                // Take the digits off the screen. They are bound to this one
+                // request; left up, they are a code for an operation that is
+                // over and the next prompt inherits stale numbers.
+                api.emit("challenge", []);
+                if (typeof cb === 'function') cb(null, Uint8Array.from(ss));
+            }
+            catch (e) {
+                api.emit("status", "OnlyKey: Problem Requesting Derived X-Wing Decapsulation");
+                api.emit("challenge", []);
+                if (typeof cb === 'function') cb(e.message || e);
+            }
+        };
+
+        // ---- Composite PGP-PQC (ML-DSA-65 + Ed25519 / ML-KEM-768 + X25519) --
+        //
+        // The device half of the pgp-pqc page. composite_pgp.js wires these to
+        // the vendored openpgp.js fork's hardware hooks, so ordinary
+        // openpgp.sign()/decrypt() calls route private-key operations to the
+        // key. Ported from onlykey-testing's lib/fido2/composite.js, which is
+        // the same protocol proven against hardware in TC-11.
+        //
+        // Unlike the derive calls these return promises rather than taking a
+        // callback, because that is what composite_pgp.js's hooks await.
+        //
+        // The one thing that differs from the Node original: there is no
+        // SEREMU channel here to inject the three challenge digits. In the
+        // browser the user reads them off the device and presses the buttons,
+        // so this simply polls until the device produces the answer.
+        var OKSIGN = 237;
+        var OKDECRYPT = 240;
+        var OKPING = 243;
+        var HALF_ECC = 0;
+        var HALF_PQC = 1;
+        var ED25519_SIG_LEN = 64;
+        var MLDSA_SIG_LEN = 3309;
+        // Both composite-decrypt halves answer with a 32-byte shared secret:
+        // X25519_SS_SIZE and MLKEM_SS_SIZE are both 32 (okpqc.cpp).
+        var COMPOSITE_SS_LEN = 32;
+        // ok_extension.cpp's MAX_LARGE_RESP_CHUNK - how much of a staged
+        // response one WebAuthn assertion carries.
+        var MAX_LARGE_RESP_CHUNK = 512;
+
+        // The firmware reports status and failures as plain ASCII through the
+        // SAME response path as real data ("Error incorrect challenge was
+        // entered", ...), so a response has to be classified rather than just
+        // measured. Returns the text when the payload is entirely printable,
+        // otherwise null. Safe because a genuine signature being all-printable
+        // is not a practical possibility - (95/256)^64 for the Ed25519 half.
+        function as_device_message(data) {
+            if (!data || !data.length) return null;
+            // The shared classifier (generated protocol.js) knows every prefix
+            // the firmware uses for status and error strings; the printable
+            // heuristic below only remains as a belt-and-braces fallback.
+            var classified = protocol.classifyResponse(data);
+            if (classified.kind !== 'data') return classified.text;
+            var text = '';
+            for (var i = 0; i < data.length; i++) text += String.fromCharCode(data[i]);
+            text = text.replace(/\0+$/, '');
+            return /^[\x20-\x7e]+$/.test(text) ? text : null;
+        }
+
+        // Polls OKPING, accumulating chunks until `expected` bytes have
+        // arrived. Reassembly is required because a response larger than one
+        // WebAuthn assertion (512 bytes - ctap.cpp's sigder[514] less a status
+        // byte and the size test) is served in pieces by
+        // send_stored_response(). An ML-DSA-65 signature is 3309 bytes, so it
+        // takes seven polls. Callers that expect a small response pass no
+        // `expected` and take the first payload.
+        //
+        // THE STATUS BYTE DECIDES WHETHER THERE IS A PAYLOAD AT ALL. Every
+        // assertion the extension path returns carries a full CBOR byte
+        // string, but only a CTAP1_SUCCESS one holds real bytes:
+        // send_stored_response() answers a poll made while the device is still
+        // waiting on the button challenge with CTAP2_ERR_USER_ACTION_PENDING
+        // and calls no extension_writeback(), so ctap.cpp falls to its default
+        // `sigder_sz = 72` and ships 71 bytes of UNINITIALISED STACK after the
+        // status byte. Measured live on an idle device: a composite_decrypt
+        // that nobody confirmed came back "successfully" in 1.4s with 71 bytes
+        // whose tail was the ASCII "OCKEDv3.0.4-test" left over from an
+        // earlier UNLOCKED response.
+        //
+        // That garbage is not printable ASCII, so classifying the payload with
+        // as_device_message() alone - the previous approach - accepted it as
+        // the answer and handed it to openpgp.js as the plaintext/signature.
+        // Keying off resp.status is what onlykey-pgp.js's msg_polling() has
+        // always done for the classic RSA path, for exactly this reason.
+        //
+        // A status string arriving AFTER chunks have started means the buffer
+        // is gone (wiped or exhausted) and the response will never complete -
+        // reported rather than silently returning a truncated signature.
+        var POLL_INTERVAL_MS = 1000; // msg_polling()'s pacing: one poll a second
+        var PING_TIMEOUT_MS = 10000;
+        // Status text the device emits while an operation is still in flight -
+        // never a reason to stop polling. Everything else it says is.
+        //
+        // All three confirmation-failure strings belong here, not just the
+        // challenge one. The firmware used to answer every failed press with
+        // "Error incorrect challenge was entered"; it now distinguishes a late
+        // press and a press-mode rejection (see the protocol spec's
+        // confirmation_window_closed and press_not_accepted). They reach this
+        // poll through the same path, at the same moment, for the same reason -
+        // OKPING is answered from the staged message buffer during the window
+        // between the confirmation being consumed and the result being stored -
+        // so treating the two new ones as terminal would abort exactly the
+        // operations the old regex was written to protect.
+        //
+        // Built from the generated table rather than retyped: these strings are
+        // compared against firmware output byte for byte, and a copy that
+        // drifts fails open into "abort a healthy operation".
+        var TRANSIENT_DEVICE_ERROR = new RegExp([
+            protocol.KNOWN_RESPONSE.WRONG_CHALLENGE,
+            protocol.KNOWN_RESPONSE.CONFIRMATION_WINDOW_CLOSED,
+            protocol.KNOWN_RESPONSE.PRESS_NOT_ACCEPTED
+        ].map(function (t) { return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }).join('|'));
+
+        // Budget: the device abandons an unconfirmed operation after ~20s
+        // (fadeoffafter20), so 45s covers a confirmed operation still working
+        // plus that abandonment message, and nothing useful happens after it.
+        //
+        // It must also stay comfortably BELOW whatever the caller is waiting
+        // on. At 120s against a 90s page-side wait, this loop still held the
+        // real diagnosis when the outer wait gave up, and the failure surfaced
+        // as a bare "did not appear within 90000ms" instead of the device's
+        // own words. The innermost budget has to expire first or its error
+        // never gets told.
+        var POLL_BUDGET_MS = 30000;
+
+        // The budget is NO-RESPONSE, not total: it is re-armed every time a
+        // chunk arrives, so a device that keeps delivering may take as long as
+        // the response needs, while a silent one still dies in POLL_BUDGET_MS.
+        //
+        // A total cap cannot work here. The device serves this response 64
+        // bytes per poll and each poll is a full WebAuthn ceremony, so a
+        // 3309-byte ML-DSA-65 signature needs ~52 polls - ~36s of steady,
+        // healthy progress. Measured live 2026-08-01 on the Node copy of this
+        // loop against a 30s total cap: two runs stopped at 2944 and 3008
+        // bytes. A moving number is the signature of a clock expiring, not of
+        // a limit being hit. Sizing a total cap for the largest possible
+        // response would also destroy its only real job - spotting a wedged
+        // device.
+        async function poll_for_response(expected, maxMs, untilShort) {
+            var deadline = Date.now() + (maxMs || POLL_BUDGET_MS);
+            var parts = [];
+            var total = 0;
+            var lastMessage = null;
+            var lastStatus = null;
+            var waited = 0;
+
+            while (Date.now() < deadline) {
+                // A SEALED empty payload, not a bare empty one.
+                //
+                // Every message that reaches the device's protected branch now
+                // has to authenticate, and okcrypto_transit_open() rejects
+                // anything shorter than its 20 bytes of framing - which an empty
+                // keyhandle is. The poll would have been refused on arrival, and
+                // a refused poll is indistinguishable from "not ready yet", so a
+                // composite decrypt would simply have spun out its budget.
+                //
+                // Sealing nothing costs 20 bytes and yields plaintext length 0,
+                // which is what the OKPING branch already expects. Against v1
+                // firmware transit_seal() falls through to aesgcm_encrypt(),
+                // which returns the same empty array as before.
+                var ping = await transit_seal([], onlykeyApi.sharedsec);
+                var resp = await onlykeyApi.ctaphid_via_webauthn(OKPING, 0, 0, 0, Uint8Array.from(ping), PING_TIMEOUT_MS);
+                lastStatus = resp && resp.status;
+                // Fail fast on anything that cannot improve by polling again.
+                // The deadline is a backstop for "still working", not a
+                // penalty box to sit out once the answer is already known.
+                //
+                // But device status text is NOT such a thing.
+                // decode_ctaphid_response_from_signature() promotes any
+                // payload beginning "Error " into resp.error, and OKPING
+                // answers "Error incorrect challenge was entered" during the
+                // legitimate window between the last challenge digit being
+                // consumed and the result being computed and stored. Treating
+                // that as terminal aborts a decrypt that was about to succeed.
+                // If the digits really were wrong, the device says so itself a
+                // few seconds later by abandoning the operation ("Timeout
+                // occured while waiting for confirmation"), which IS terminal
+                // and is handled below - so the failure still comes from the
+                // device rather than from a guess made here.
+                if (resp && resp.error && !TRANSIENT_DEVICE_ERROR.test(resp.error)) {
+                    throw new Error('Composite poll failed: ' + resp.error);
+                }
+                if (lastStatus === 'CTAP1_SUCCESS' && resp.data && resp.data.length) {
+                    var msg = as_device_message(resp.data);
+                    if (msg) {
+                        if (total > 0) break;
+                        lastMessage = msg;
+                        // The device has stopped waiting - no later poll can
+                        // produce the answer, so report it now instead of
+                        // spending the rest of the budget. "Error incorrect
+                        // challenge was entered" is deliberately NOT in here:
+                        // OKPING answers that during the window between the
+                        // last digit being consumed and the result being
+                        // stored, when the operation is still on its way.
+                        if (/Timeout occured while waiting for confirmation/.test(msg)) {
+                            throw new Error('Composite operation abandoned by the device: "' + msg + '"');
+                        }
+                    }
+                    else {
+                        // A chunk has a KNOWN shape: send_stored_response()
+                        // hands back MAX_LARGE_RESP_CHUNK bytes per poll until
+                        // the tail, so every chunk but the last is exactly 512
+                        // and the last lands exactly on `expected`. Anything
+                        // else did not come off the cursor.
+                        //
+                        // Without this a TRUNCATED chunk is indistinguishable
+                        // from a whole one, because its bytes are genuine.
+                        // Measured live 2026-08-01 on the Node copy of this
+                        // loop: the device staged a correct 3309-byte ML-DSA
+                        // signature and advanced its cursor a full 512 per
+                        // poll while each assertion carried only 71 bytes, so
+                        // the reassembled signature was real bytes in the wrong
+                        // places and verified under no framing. Fixed in
+                        // firmware (ctap.cpp no longer sizes assertions from
+                        // pending_operation); this is the host-side guarantee,
+                        // and what an older build still needs.
+                        if (expected && resp.data.length !== MAX_LARGE_RESP_CHUNK
+                            && total + resp.data.length !== expected) {
+                            await new Promise(function(r) { setTimeout(r, POLL_INTERVAL_MS); });
+                            continue;
+                        }
+                        parts.push(Array.from(resp.data));
+                        total += resp.data.length;
+                        deadline = Date.now() + (maxMs || POLL_BUDGET_MS); // progress: re-arm
+                        api.emit("status", "OnlyKey: Receiving response (" + total +
+                            (expected ? " of " + expected : "") + " bytes)");
+                        // untilShort: drain the staged response without being
+                        // told its length. send_stored_response() serves
+                        // MAX_LARGE_RESP_CHUNK bytes per poll until the tail, so
+                        // the first chunk SHORTER than that is the last one.
+                        // Used by the X-Wing derive, where the host cannot
+                        // compute the total: the staged response is
+                        // [ transit pubkey(32) | status field | recipient(1216) ]
+                        // and the status field's width is a firmware build
+                        // constant (sizeof(UNLOCKED)+1) that the host has no way
+                        // to know.
+                        if (untilShort) {
+                            if (resp.data.length === MAX_LARGE_RESP_CHUNK) continue;
+                            return Uint8Array.from([].concat.apply([], parts));
+                        }
+                        if (!expected || total >= expected) {
+                            var out = [].concat.apply([], parts);
+                            return Uint8Array.from(expected ? out.slice(0, expected) : out);
+                        }
+                        continue; // more to collect - poll again immediately
+                    }
+                }
+                // Not a payload: the device is still waiting on the challenge
+                // (CTAP2_ERR_USER_ACTION_PENDING), still computing
+                // (CTAP2_ERR_OPERATION_PENDING), or has nothing staged. Pace
+                // the next poll rather than spinning - each one is a full
+                // WebAuthn ceremony.
+                //
+                // Report the wait with a counter. ML-DSA-65 signing takes the
+                // device around ten seconds on a 72MHz Cortex-M4, during which
+                // a caller sees no payload and no state change at all - a
+                // healthy device and a wedged one look identical. A count that
+                // advances each poll tells them apart, and lets a watcher with
+                // a no-progress budget wait as long as the device is answering.
+                waited++;
+                api.emit("status", "OnlyKey: Waiting for device (" + waited + ")");
+                await new Promise(function(r) { setTimeout(r, POLL_INTERVAL_MS); });
+            }
+            if (total > 0) {
+                throw new Error('Incomplete composite response: got ' + total + ' of ' + expected +
+                    ' bytes in ' + parts.length + ' chunk(s)' +
+                    (lastMessage ? ' - last device message: "' + lastMessage + '"' : '') +
+                    ' - last status: ' + lastStatus);
+            }
+            throw new Error('No composite response' +
+                (lastMessage ? ' - last device message: "' + lastMessage + '"' : '') +
+                ' - last status: ' + lastStatus);
+        }
+
+        // Sends the payload to the device, chunked.
+        //
+        // A WebAuthn keyhandle carries at most 255 bytes including a 10-byte
+        // header, so anything larger has to go in pieces - an ML-KEM-768
+        // ciphertext is 1088 bytes and an ML-DSA digest payload is well over
+        // the limit too. Sending it in one call throws "Max size exceeded"
+        // out of encode_ctaphid_request_as_keyhandle(), which surfaces on the
+        // page as "Error decrypting message: Max size exceeded" (confirmed
+        // live, TC-11).
+        //
+        // The framing is onlykey-pgp.js's u2fSignBuffer(), reused rather than
+        // reinvented because it is what the classic RSA path has always used
+        // and what the firmware's OKSIGN/OKDECRYPT dispatch already expects:
+        // 228-byte chunks, opt2 set only on the FINAL chunk, opt3 carrying an
+        // incrementing packet number. Each chunk is encrypted on its own -
+        // the firmware decrypts per packet and reassembles in packet_buffer,
+        // so encrypting the whole payload once would not survive the split.
+        //
+        // opt2 is what tells the device the input is complete; without it the
+        // device keeps waiting for more and never primes the challenge.
+        // THIS MUST BE A MULTIPLE OF 57, and it is the binding constraint -
+        // not the keyhandle capacity.
+        //
+        // ok_extension.cpp re-chunks each arriving keyhandle into 57-byte
+        // device packets:
+        //
+        //     recv_buffer[6] = 0xFF;
+        //     if (opt2 && handle_len<=57) recv_buffer[6] = handle_len;
+        //
+        // 0xFF means "a full 57 bytes, more coming", and the real length is
+        // written only when opt2 marks the FINAL host chunk. There is no way to
+        // say "n bytes, more coming". So on every chunk but the last, a tail
+        // shorter than 57 still counts as 57 and the device advances its offset
+        // past bytes the host never sent.
+        //
+        // 224 (= 228 - 20/5, picked to fit the transit frame) broke that
+        // silently. Each 224-byte chunk splits 57+57+57+53, the 53 counts as
+        // 57, and a derived X-Wing [label(32) | ct(1120)] = 1152 sends five
+        // non-final chunks, so the device reached 1140 where the host had sent
+        // 1120 and the 32-byte tail took it to 1172 against a 1152 total. That
+        // is 20 over, past the 16-byte padding tolerance, and the request was
+        // refused with "Error derived decaps payload size" - measured on
+        // hardware 2026-09-16, v3.0.5-test, on the decapsulation half of the
+        // age-derive round trip. RSA-4096 decrypt (512 B, two non-final chunks)
+        // overshot by 8 the same way.
+        //
+        // Sizing, in order:
+        //   * a credential id is 255 bytes with a 10-byte header, so one
+        //     assertion carries 245;
+        //   * the transit frame costs 20 (4-byte counter + 16-byte tag),
+        //     leaving 225 of plaintext;
+        //   * the largest multiple of 57 at or below 225 is 171.
+        //
+        // 171 + 20 = 191 on the wire. Chunk counts go up - ML-KEM-768 (1088 B)
+        // 5 -> 7, derived X-Wing (1152 B) 6 -> 7, RSA-4096 (512 B) 3 -> 3 - and
+        // each chunk is a full WebAuthn ceremony, so priming is slower. That is
+        // the price of the framing; correctness is not negotiable against it.
+        var COMPOSITE_MAX_PACKET = 171; // 57 (OK packet size) * 3; + 20-byte frame = 191 <= 245
+
+        // opt3 must INCREASE ACROSS OPERATIONS, not restart per operation.
+        //
+        // ok_extension.cpp's duplicate-packet guard is
+        //
+        //     if (!packet_buffer_details[3]) packet_buffer_details[3] = opt3;
+        //     else if (opt3 <= packet_buffer_details[3]) return 0;
+        //
+        // and packet_buffer_details[3] is only cleared by wipetasks(), which
+        // runs off a 5-second timer. wipedata() - what actually runs after a
+        // response is stored - clears [0] and [1] and leaves [3] alone. So a
+        // second operation starting within that window arrives with the
+        // previous operation's high-water mark still in place, and restarting
+        // at 1 makes its FIRST chunk fail `opt3 <= last` and get silently
+        // dropped. Nothing reports it: the device simply accumulates a short
+        // payload, hashes that, and asks for challenge digits computed over
+        // bytes the host never sent - which is exactly "Error incorrect
+        // challenge was entered" for a composite decrypt whose ML-KEM half
+        // (1088 B, 5 chunks) follows its X25519 half (32 B, 1 chunk).
+        //
+        // Counting up from 1 and never resetting keeps every chunk strictly
+        // greater than the last one the device saw. Wrapping back to 1 at 255
+        // is the one case this cannot cover; a session sends far fewer chunks
+        // than that, and by then the 5s wipetasks() has long since cleared the
+        // high-water mark anyway.
+        var composite_packetnum = 0;
+
+        function next_packetnum() {
+            composite_packetnum = composite_packetnum >= 255 ? 1 : composite_packetnum + 1;
+            return composite_packetnum;
+        }
+
+        async function prime_composite(cmd, slot, payload) {
+            var bytes = Array.from(payload);
+            var last = null;
+            // An ML-KEM-768 ciphertext is 1088 bytes = 5 keyhandles, each a
+            // full WebAuthn ceremony, so priming alone runs several seconds
+            // before the device has anything to confirm. Report each one.
+            //
+            // This is not decoration. A caller watching a single unchanging
+            // "Decrypting..." string cannot tell a send in progress from a
+            // wedged device, and anything with a no-progress budget shorter
+            // than the whole send will abandon a healthy operation partway -
+            // measured 2026-08-01, a GUI decrypt gave up after 5s with the
+            // device still receiving chunks and no final packet yet sent.
+            var total = Math.ceil(bytes.length / COMPOSITE_MAX_PACKET) || 1;
+            var sent = 0;
+            while (bytes.length > 0) {
+                var chunk = bytes.slice(0, COMPOSITE_MAX_PACKET);
+                bytes = bytes.slice(COMPOSITE_MAX_PACKET);
+                var finalPacket = bytes.length === 0 ? 1 : 0;
+                var packetnum = next_packetnum();
+                var encrypted = await transit_seal(chunk, onlykeyApi.sharedsec);
+                last = await onlykeyApi.ctaphid_via_webauthn(
+                    cmd, slot, finalPacket, packetnum, encrypted, 10000
+                );
+                // A failed chunk must END the send, not be stepped over.
+                //
+                // This loop used to ignore what came back. Any ceremony that
+                // failed - a cancelled prompt, a tab the browser refused to run
+                // WebAuthn in, an unplugged key mid-send - simply did not reach
+                // the device, and the loop went on to the next chunk and
+                // eventually set opt2. The device then reassembled a payload
+                // short by however many chunks were lost and refused it with
+                //
+                //     Error derived decaps payload size
+                //
+                // which blames the payload for a transport failure and sent me
+                // looking at chunk arithmetic that was correct. Whatever the
+                // cause, the honest report is the chunk that did not land.
+                if (!last || last.error) {
+                    // A refusal the device explains (stored-key use over FIDO2
+                    // switched off, the default) did reach the device, so say
+                    // what it said rather than "did not reach".
+                    var why = (last && last.error) || 'no response';
+                    var explained = explainDeviceError(why);
+                    if (explained !== why) throw new Error(explained);
+                    throw new Error('chunk ' + (sent + 1) + ' of ' + total +
+                                    ' did not reach the device: ' + why);
+                }
+                sent++;
+                api.emit("status", "OnlyKey: Sending data to device (packet " + sent + " of " + total + ")");
+            }
+            return last;
+        }
+
+        // One half of a composite signature. `half` selects Ed25519 (0) or
+        // ML-DSA-65 (1); `digest` goes to the device UNCHANGED - the ML-DSA
+        // half's FIPS 204 empty-context framing is applied firmware-side by
+        // okpqc.cpp, not here.
+        api.composite_sign = async function(slot, half, digest) {
+            api.emit("status", "OnlyKey: Signing (" + (half === HALF_PQC ? "ML-DSA-65" : "Ed25519") + ") - confirm on the device");
+            var payload = new Uint8Array(1 + digest.length);
+            payload[0] = half;
+            payload.set(Uint8Array.from(digest), 1);
+            await prime_composite(OKSIGN, slot, payload);
+            // The device seals this now (okpqc.cpp sends every composite
+            // response with encrypt = 1, where it used to send them bare), so
+            // poll_for_response() is told the FRAMED length - its chunk-shape
+            // check compares against what is actually on the wire - and the
+            // frame is opened once the whole thing is reassembled.
+            var expected = transit_framed(half === HALF_ECC ? ED25519_SIG_LEN : MLDSA_SIG_LEN);
+            var sig = await transit_open(await poll_for_response(expected), onlykeyApi.sharedsec);
+            api.emit("status", "OnlyKey: Signature complete");
+            return Uint8Array.from(sig);
+        };
+
+        // The device half of composite decryption. okpqc_decrypt() infers
+        // which half is being asked for purely from the input size - 32 bytes
+        // is the X25519 ephemeral point, 1088 the ML-KEM-768 ciphertext - so
+        // unlike signing there is no selector byte.
+        api.composite_decrypt = async function(slot, data) {
+            api.emit("status", "OnlyKey: Decrypting - confirm on the device");
+            await prime_composite(OKDECRYPT, slot, Uint8Array.from(data));
+            // State the expected length. Passing null returned the FIRST binary
+            // reply of any size and skipped the chunk-shape check entirely -
+            // which is exactly how a short or off-cursor reply gets accepted as
+            // a shared secret. Both halves answer 32 bytes.
+            //
+            // Sealed since okpqc.cpp stopped sending composite results bare -
+            // these two 32-byte values are the shared secrets the whole
+            // operation exists to produce, and they used to cross the tunnel in
+            // the clear while the classical half encrypted the same thing.
+            var out = await transit_open(await poll_for_response(transit_framed(COMPOSITE_SS_LEN)),
+                                         onlykeyApi.sharedsec);
+            api.emit("status", "OnlyKey: Decryption complete");
+            return Uint8Array.from(out);
+        };
+
+        api.encode_key = encode_key;
+        api.decode_key = decode_key;
+        api.build_AESGCM = build_AESGCM;
+        api.nacl = nacl;
+        api.forge = forge;
+        // The transport this module was built against. onlykey-pgp.js already
+        // receives the same object as an argument; exposing it here gives the
+        // pages (and the test harness driving them) one wire-level entry point
+        // for probing the device directly - otherwise onlykeyApi is reachable
+        // only through the architect registry, which no page holds a handle to.
+        api.onlykeyApi = onlykeyApi;
+
+        return api;
+    }
+
+    return onlykey;
+};

@@ -1,0 +1,249 @@
+const path = require('path');
+const webpack = require('webpack');
+// const MinifyPlugin = require("babel-minify-webpack-plugin");
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+// const CopyWebpackPlugin = require('copy-webpack-plugin');
+// const HtmlWebpackIncludeAssetsPlugin = require('html-webpack-include-assets-plugin');
+// const SriPlugin = require('webpack-subresource-integrity');
+const CspHtmlWebpackPlugin = require("csp-html-webpack-plugin");
+
+var cspOptions = {
+    enabled: true,
+    policy: {
+        'default-src': "'self'",
+        'base-uri': "'none'",
+        'object-src': "'none'",
+        'script-src': [
+            // "'unsafe-inline'",
+            "'self'", 
+            "'unsafe-eval'"],
+        'style-src': [
+            // "'unsafe-inline'", 
+            "'self'", 
+            "'unsafe-eval'"],
+        'img-src': [
+            "'self'",
+            "data:",
+            "https://www.gravatar.com",
+            "https://raw.githubusercontent.com/keybase/client/master/browser/images/icon-keybase-logo-128.png",
+            "https://s3.amazonaws.com/keybase_processed_uploads/",
+
+        ],
+        'connect-src': [
+            "'self'",
+            "https://keybase.io",
+            "https://onlykey.herokuapp.com", //for api
+            "wss://onlykey.herokuapp.com", //for gun
+        ]
+    },
+    hashEnabled: {
+        'script-src': true,
+        'style-src': true
+    },
+    nonceEnabled: {
+        'script-src': true,
+        'style-src': true
+    },
+    //processFn: defaultProcessFn
+};
+
+var pageFiles = getPagesList();
+
+// Cache buster for the stylesheets.
+//
+// The bundle gets `hash: true`, which makes html-webpack-plugin append the
+// compilation hash to the script tag it INJECTS. The <link> tags are written by
+// hand in the templates, so they got nothing: every shell asked for
+// `css/onlyagent-theme.css` at a URL that never changed, and GitHub Pages
+// serves it with a long max-age. A returning visitor therefore kept whatever
+// stylesheet they first downloaded - measured 2026-09-18 on onlyagent.app,
+// where a browser held a pre-monochrome copy while the server had the new one
+// and `fetch()` with a query string returned the correct file.
+//
+// Hashing the css directory's CONTENTS rather than stamping a timestamp means
+// the URL only moves when a stylesheet actually moves, so unchanged builds
+// stay cached.
+var cssVersion = hashDir('./src/assets/css');
+
+let plugins = [
+
+    // Build-time switch for the debug console in production builds; see
+    // src/plugins.js. Unset (the default) means the no-op console.
+    new webpack.DefinePlugin({
+        'process.env.OK_WEB_DEBUG_CONSOLE': JSON.stringify(process.env.OK_WEB_DEBUG_CONSOLE || ''),
+    }),
+
+    new HtmlWebpackPlugin({
+        app_pages: pageFiles,
+        css_v: cssVersion,
+        dir_name: "./app",
+        filename: './index.html',
+        template: './src/index-src.html',
+        inject: 'body',
+        minify: (process.env.NODE_ENV === 'production') ? { collapseWhitespace: true, removeComments: true } : false,
+        hash: (process.env.NODE_ENV === 'production') ? true : false,
+        cache: false,
+        showErrors: false,
+
+        cspPlugin: cspOptions
+    }),
+
+    new HtmlWebpackPlugin({
+        app_pages: pageFiles,
+        css_v: cssVersion,
+        dir_name: ".",
+        filename: './app/index.html',
+        template: './src/index-src.html',
+        inject: 'body',
+        minify: (process.env.NODE_ENV === 'production') ? { collapseWhitespace: true, removeComments: true } : false,
+        hash: (process.env.NODE_ENV === 'production') ? true : false,
+        cache: false,
+        showErrors: false,
+
+        cspPlugin: cspOptions
+    })
+
+];
+
+for (var i in pageFiles) {
+    var filename = pageFiles[i].name;
+    plugins.push(
+        new HtmlWebpackPlugin({
+            app_pages: pageFiles,
+        css_v: cssVersion,
+            page: filename,
+            filename: (process.env.NODE_ENV === 'production') ? './app/' + filename + '.html' : './app/' + filename + '.html',
+            template: './src/app-src.html',
+            inject: 'body',
+            minify: (process.env.NODE_ENV === 'production') ? { collapseWhitespace: true, removeComments: true } : false,
+            hash: (process.env.NODE_ENV === 'production') ? true : false,
+            cache: false,
+            showErrors: false,
+
+            cspPlugin: cspOptions
+        })
+    );
+}
+
+
+plugins.push(new CspHtmlWebpackPlugin({}, {}));
+
+
+module.exports = {
+    mode: process.env.NODE_ENV,
+    entry: [(process.env.NODE_ENV === 'production') ? './src/entry.js' : './src/entry-devel.js'],
+    externals: {
+        // u2f: './src/u2f-api.js',
+        // Virtru: './src/virtru-sdk.min.js'
+    },
+    output: {
+        path: path.resolve(__dirname, (process.env.OUT_DIR) ? process.env.OUT_DIR : './'),
+        filename: './app/bundle.[hash].js',
+        crossOriginLoading: 'anonymous'
+    },
+    plugins: plugins,
+    resolve: {
+        alias: {
+            // Vendored, not npm-installed - see
+            // src/onlykey-fido2/onlykey/vendor/@noble/VENDORED.md. Needed
+            // because @noble/post-quantum imports @noble/hashes (and,
+            // transitively via _crystals.js, @noble/curves/abstract/fft.js)
+            // via bare specifiers internally - this alias is the only thing
+            // that lets those resolve without modifying the vendored files
+            // themselves.
+            '@noble/hashes': path.resolve(__dirname, 'src/onlykey-fido2/onlykey/vendor/@noble/hashes'),
+            '@noble/post-quantum': path.resolve(__dirname, 'src/onlykey-fido2/onlykey/vendor/@noble/post-quantum'),
+            '@noble/ciphers': path.resolve(__dirname, 'src/onlykey-fido2/onlykey/vendor/@noble/ciphers'),
+            '@noble/curves': path.resolve(__dirname, 'src/onlykey-fido2/onlykey/vendor/@noble/curves'),
+        }
+    },
+    module: {
+        rules: [{
+            // Scoped only to the vendored @noble packages and the vendored
+            // openpgp.js fork - webpack 4's built-in parser can't handle the
+            // modern syntax they ship with (optional chaining, ES2022 class
+            // fields). Deliberately not applied project-wide: this
+            // transpiles at build time only, the committed files in vendor/
+            // stay byte-for-byte unmodified/diffable against their source
+            // (see each vendor dir's VENDORED.md).
+            test: /\.js$/,
+            include: [
+                path.resolve(__dirname, 'src/onlykey-fido2/onlykey/vendor/@noble'),
+                path.resolve(__dirname, 'src/onlykey-fido2/onlykey/vendor/openpgp'),
+            ],
+            use: {
+                loader: 'babel-loader',
+                options: {
+                    // modules: false - leave import/export as-is so webpack
+                    // still does its own module resolution/tree-shaking;
+                    // only the newer syntax (optional chaining, class
+                    // fields) needs transpiling for webpack 4's parser.
+                    presets: [['@babel/preset-env', { targets: { esmodules: true }, modules: false }]],
+                },
+            },
+        }, {
+            test: /\.page\.html$/i,
+            use: 'raw-loader',
+        }, {
+            test: /\.modal\.html$/i,
+            use: 'raw-loader',
+        }, {
+            test: /\.template\.html$/i,
+            use: 'raw-loader',
+        }]
+    },
+};
+
+/** Short content hash of every file in a directory, for cache-busting the
+ *  hand-written <link> tags. Sorted so the result does not depend on readdir
+ *  order, and non-fatal: a missing directory just yields a constant, which is
+ *  no worse than the no-buster behaviour it replaces. */
+function hashDir(dir) {
+    try {
+        var fs = require('fs');
+        var crypto = require('crypto');
+        var h = crypto.createHash('sha256');
+        fs.readdirSync(dir).sort().forEach(function(name) {
+            var p = path.join(dir, name);
+            if (!fs.statSync(p).isFile()) return;
+            h.update(name);
+            h.update(fs.readFileSync(p));
+        });
+        return h.digest('hex').slice(0, 12);
+    } catch (e) {
+        return 'nocss';
+    }
+}
+
+function getPagesList() {
+
+    var _files = [];
+
+
+    var plugins = require("./src/plugins.js");
+    if (!(process.env.NODE_ENV === 'production')) {
+        plugins = [].concat(plugins, require("./src/plugins-devel.js"));
+    }
+
+    for (var i in plugins) {
+        if (plugins[i].pagesList) {
+            for (var j in plugins[i].pagesList) {
+                _files.push({
+                    name: j,
+                    icon: plugins[i].pagesList[j].icon,
+                    title: plugins[i].pagesList[j].title,
+                    sort: plugins[i].pagesList[j].sort
+                });
+            }
+        }
+    }
+
+    _files.sort(function(a,b){
+        if(!a.sort)a.sort=10000;
+        if(!b.sort)b.sort=10000;
+        return b.sort - a.sort;
+    });
+    _files.reverse();
+    
+    return _files;
+}

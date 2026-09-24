@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>OnlyKey — Encrypt, decrypt &amp; sign in your browser</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link href="<%= htmlWebpackPlugin.options.dir_name %>/css/bootstrap.min.css?<%= htmlWebpackPlugin.options.css_v %>" rel="stylesheet">
+  <link href="<%= htmlWebpackPlugin.options.dir_name %>/css/font-awesome.min.css?<%= htmlWebpackPlugin.options.css_v %>" rel="stylesheet">
+  <link href="<%= htmlWebpackPlugin.options.dir_name %>/css/onlyagent-theme.css?<%= htmlWebpackPlugin.options.css_v %>" rel="stylesheet">
+</head>
+<body data-page="index">
+  <input id="onlykey_start" value="Encrypt and Sign" type="hidden" />
+
+  <header class="oa-nav"><div class="inner">
+    <a class="oa-brand" href="/"><span class="oa-dot"></span> OnlyKey</a>
+    <nav class="oa-navlinks">
+      <a href="<%= htmlWebpackPlugin.options.dir_name %>/encrypt"><i class="fa fa-lock"></i><span>Encrypt</span></a>
+      <a href="<%= htmlWebpackPlugin.options.dir_name %>/decrypt"><i class="fa fa-unlock"></i><span>Decrypt</span></a>
+      <a href="<%= htmlWebpackPlugin.options.dir_name %>/search"><i class="fa fa-search"></i><span>Search</span></a>
+      <span class="sep"></span>
+      <a href="https://docs.crp.to"><i class="fa fa-book"></i><span>Docs</span></a>
+      <a href="https://onlykey.io"><i class="fa fa-shopping-cart"></i><span>Get OnlyKey</span></a>
+    </nav>
+  </div></header>
+
+  <main class="oa-main">
+    <section class="oa-hero">
+      <h1>Encrypt anything with <span class="g">your hardware key</span>.</h1>
+      <p>Securely encrypt, sign, decrypt and verify messages and files right in your browser. Your private keys never leave your OnlyKey.</p>
+      <div class="oa-cta-row">
+        <a id="setTime" class="btn btn-secondary">Set Time for OTP 2FA</a>
+      </div>
+    </section>
+
+    <!-- Three cards, matching the app's header: Encrypt, Decrypt, Search.
+         This used to list five, one per page, back when a file and a message
+         were separate destinations. They are methods inside a task now - the
+         selector on each page picks Message, File, PQC-PGP or AGE - so the
+         landing page and the app told different stories until this changed.
+         The -file routes still work; they are just not advertised as tools. -->
+    <section class="oa-tools">
+      <a class="oa-tool" href="<%= htmlWebpackPlugin.options.dir_name %>/encrypt"><div class="ic"><i class="fa fa-lock"></i></div><h3>Encrypt &amp; Sign</h3><p>Messages or files, for any Keybase or Protonmail user — with classic PGP, composite PGP-PQC, or derived age encryption.</p></a>
+      <a class="oa-tool" href="<%= htmlWebpackPlugin.options.dir_name %>/decrypt"><div class="ic"><i class="fa fa-unlock"></i></div><h3>Decrypt &amp; Verify</h3><p>Open incoming messages and files, and confirm they came from who you expect. Your private keys never leave your OnlyKey.</p></a>
+      <a class="oa-tool" href="<%= htmlWebpackPlugin.options.dir_name %>/search"><div class="ic"><i class="fa fa-search"></i></div><h3>Find a Recipient</h3><p>Search Keybase and Protonmail for someone to send encrypted messages to.</p></a>
+    </section>
+
+  </main>
+
+  <footer class="oa-footer"><div class="inner">
+    <div>© 2026 OnlyKey</div>
+    <div class="oa-footer-links">
+      <a href="https://onlykey.io">onlykey.io</a>
+      <a href="https://docs.crp.to">Help</a>
+      <a href="https://crp.to/">CryptoTrust LLC</a>
+    </div>
+  </div></footer>
+</body>
+</html>
