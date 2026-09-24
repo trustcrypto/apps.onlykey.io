@@ -1,6 +1,6 @@
 module.exports = {
   "name": "OnlyKey Webcrypt App",
-  "version": "3.1.0",
+  "version": "4.0.0",
   "stage": "prod",
   "change_log": [
     "For OnlyKey firmware newer than v3.0.4 (served at apps.onlykey.io)",
