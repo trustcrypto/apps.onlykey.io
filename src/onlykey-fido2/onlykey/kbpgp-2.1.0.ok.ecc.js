@@ -16093,7 +16093,11 @@ _continue()
           case S.issuer_fingerprint:
             return IssuerFingerprint;
           default:
-            if (type >= S.experimental_low && type <= S.experimental_high) {
+            // RFC 4880 5.2.3.1: an unknown subpacket is ignored unless it is marked
+            // critical. Current GnuPG writes subpacket 34 (preferred AEAD algorithms)
+            // into every new key. Kept as raw bytes; signatures verify over the
+            // original hashed data.
+            if ((type >= S.experimental_low && type <= S.experimental_high) || !critical) {
               return Experimental;
             } else {
               throw new Error("Unknown signature subpacket: " + type);
