@@ -228,6 +228,22 @@ module.exports = function(imports, onlykeyApi) {
 
         var appKey;
 
+        // Every derive below is an ENCRYPTED OKCONNECT, and the transit framing
+        // (v1 or v2) is chosen from the firmware version that only a PLAIN
+        // OKCONNECT returns readably - transit_select(), in api.connect() or in
+        // onlykey-api.js. A page that derives before anything has connected
+        // (age-encrypt, age-decrypt or the vault opened directly, without the
+        // index page's Set Time) therefore framed v1 at a v2 device: the reply
+        // decrypted without a tag check into bytes that are not the key. The
+        // X-Wing derive returned a wrong 1216-byte recipient, and a P-256
+        // derive produced a point off the curve and a callback that never
+        // fired. Measured on the emulator 2026-10-25. Connect first, the way
+        // the encrypt and decrypt pages already do.
+        async function ensure_connected() {
+            if (!onlykeyApi.init) await onlykeyApi.connect();
+            if (!onlykeyApi.init) throw new Error("OnlyKey not connected - refresh the page and try again");
+        }
+
         api.connect = async function(cb) {
             var delay = 0;
 
@@ -298,6 +314,14 @@ module.exports = function(imports, onlykeyApi) {
         }
 
         api.derive_public_key = async function(additional_d, keytype, press_required, cb) {
+            try {
+                await ensure_connected();
+            }
+            catch (e) {
+                api.emit("status", "OnlyKey: " + e.message);
+                if (typeof cb === 'function') cb(e.message);
+                return;
+            }
 
             console.log("-------------------------------------------");
             // msg("Requesting OnlyKey Derive Public Key");
@@ -396,6 +420,14 @@ module.exports = function(imports, onlykeyApi) {
         }
 
         api.derive_shared_secret = async function(additional_d, pubkey, keytype, press_required, cb) {
+            try {
+                await ensure_connected();
+            }
+            catch (e) {
+                api.emit("status", "OnlyKey: " + e.message);
+                if (typeof cb === 'function') cb(e.message);
+                return;
+            }
             
             if(keytype == KEYTYPE.P256R1 || keytype == KEYTYPE.P256K1)
                 pubkey = EPUB_TO_ONLYKEY_ECDH_P256(pubkey);
@@ -673,6 +705,7 @@ module.exports = function(imports, onlykeyApi) {
         api.derive_xwing_recipient = async function(label, cb) {
             api.emit("status", "OnlyKey: Requesting Derived X-Wing Recipient");
             try {
+                await ensure_connected();
                 var r = await xwing_derive(label);
                 api.emit("status", "OnlyKey: Derived X-Wing Recipient Complete");
                 if (typeof cb === 'function') cb(null, r.recipient);
@@ -738,6 +771,7 @@ module.exports = function(imports, onlykeyApi) {
         api.derive_xwing_decap = async function(label, ciphertext, cb) {
             api.emit("status", "OnlyKey: Requesting Derived X-Wing Decapsulation - confirm on the device");
             try {
+                await ensure_connected();
                 if (!ciphertext || ciphertext.length !== XWING_CT) {
                     throw new Error('X-Wing ct must be ' + XWING_CT + ' bytes, got ' + (ciphertext ? ciphertext.length : 0));
                 }
