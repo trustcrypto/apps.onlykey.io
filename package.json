@@ -22,7 +22,8 @@
     "heroku-postbuild": "bash ./BUILD.sh 1",
     "start": "node ./index.js",
     "test:pqc": "webpack --config webpack.config.js --entry ./test/pqc.test.js --output-path ./test/.build --output-filename pqc-bundle.js --mode development --target node && node ./test/.build/pqc-bundle.js",
-    "test:age-kat": "webpack --config webpack.config.js --entry ./test/age-pq-kat.test.js --output-path ./test/.build --output-filename age-pq-kat-bundle.js --mode development --target node && node ./test/.build/age-pq-kat-bundle.js"
+    "test:age-kat": "webpack --config webpack.config.js --entry ./test/age-pq-kat.test.js --output-path ./test/.build --output-filename age-pq-kat-bundle.js --mode development --target node && node ./test/.build/age-pq-kat-bundle.js",
+    "test:age-interop": "webpack --config webpack.config.js --entry ./test/age-interop.test.js --output-path ./test/.build --output-filename age-interop-bundle.js --mode development --target node && node ./test/.build/age-interop-bundle.js"
   },
   "bugs": {
     "url": "https://github.com/onlykey/onlykey.github.io/issues"

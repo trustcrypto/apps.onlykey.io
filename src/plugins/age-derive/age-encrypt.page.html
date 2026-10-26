@@ -9,11 +9,14 @@
     <label for="identity_out">Identity (age -d -i ...)</label>
     <input readonly="readonly" type="text" id="identity_out" />
 
+    <label for="recipient_out">Recipient (age1pq... - age 1.3+, rage and typage encrypt to this OnlyKey with no plugin)</label>
+    <input readonly="readonly" type="text" id="recipient_out" />
+
     <label for="plaintext">Plaintext to encrypt</label>
     <textarea placeholder="Plaintext" rows="3" id="plaintext"></textarea>
     <button type="button" id="encrypt_start" value="Encrypt">Encrypt</button>
 
-    <label for="age_file_out">Encrypted age file (base64)</label>
+    <label for="age_file_out">Encrypted age file (ASCII armor - age, rage and typage read it as is)</label>
     <textarea readonly="readonly" rows="4" id="age_file_out"></textarea>
 </fieldset>
 <div id="challenge_code_box" class="oa-challenge">

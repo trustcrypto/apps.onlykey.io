@@ -127,6 +127,48 @@ function b64NoPad(bytes) {
     return Buffer.from(bytes).toString('base64').replace(/=+$/, '');
 }
 
+function isCanonicalB64NoPad(str) {
+    return /^[A-Za-z0-9+/]*$/.test(str) && b64NoPad(b64Decode(str)) === str;
+}
+
+// ---- ASCII armor (age.md "ASCII armor": strict PEM, RFC 7468 sec. 3) ------
+const ARMOR_BEGIN = '-----BEGIN AGE ENCRYPTED FILE-----';
+const ARMOR_END = '-----END AGE ENCRYPTED FILE-----';
+
+function armorEncode(bytes) {
+    const b64 = Buffer.from(bytes).toString('base64');
+    let out = ARMOR_BEGIN + '\n';
+    for (let i = 0; i < b64.length; i += 64) out += b64.slice(i, i + 64) + '\n';
+    return out + ARMOR_END + '\n';
+}
+
+// Strict, as age.md asks: whitespace is allowed only around the PEM block,
+// LF or CRLF, 64-column lines with only the last shorter, canonical padded
+// base64. Anything else is refused rather than guessed at.
+function armorDecode(text) {
+    const lines = String(text).trim().split(/\r?\n/);
+    if (lines.length < 3 || lines[0] !== ARMOR_BEGIN || lines[lines.length - 1] !== ARMOR_END) {
+        throw new Error('not an armored age file (expected "' + ARMOR_BEGIN + '" ... "' + ARMOR_END + '")');
+    }
+    const body = lines.slice(1, -1);
+    for (let i = 0; i < body.length; i++) {
+        const last = i === body.length - 1;
+        if (!/^[A-Za-z0-9+/=]+$/.test(body[i]) || (last ? body[i].length > 64 : body[i].length !== 64)) {
+            throw new Error('malformed age armor: every line but the last must be 64 base64 characters');
+        }
+    }
+    const b64 = body.join('');
+    const bytes = new Uint8Array(Buffer.from(b64, 'base64'));
+    if (Buffer.from(bytes).toString('base64') !== b64) {
+        throw new Error('malformed age armor: non-canonical base64');
+    }
+    return bytes;
+}
+
+function isArmored(text) {
+    return String(text).trimStart().startsWith(ARMOR_BEGIN);
+}
+
 function b64Decode(str) {
     return new Uint8Array(Buffer.from(str, 'base64'));
 }
@@ -157,35 +199,27 @@ function chunkNonce(counter, isLast) {
     return nonce;
 }
 
+// The final chunk carries the last-chunk flag and MAY be a full 64 KiB, but
+// MUST NOT be empty unless the whole payload is (age.md, "Payload"). This used
+// to end a payload that was an exact multiple of 64 KiB with an extra empty
+// final chunk, which age and typage refuse ("last chunk is empty").
 function streamEncrypt(payloadKey, plaintext) {
     const parts = [];
-    if (plaintext.length === 0) {
-        const cipher = chacha20poly1305(payloadKey, chunkNonce(0, true));
-        parts.push(cipher.encrypt(EMPTY));
-    } else {
-        let offset = 0;
-        let counter = 0;
-        while (offset < plaintext.length) {
-            const remaining = plaintext.length - offset;
-            const takeLen = Math.min(remaining, CHUNK_SIZE);
-            const chunk = plaintext.subarray(offset, offset + takeLen);
-            offset += takeLen;
-            const isLast = offset >= plaintext.length && takeLen < CHUNK_SIZE;
-            const cipher = chacha20poly1305(payloadKey, chunkNonce(counter, isLast));
-            parts.push(cipher.encrypt(chunk));
-            counter++;
-        }
-        if (plaintext.length % CHUNK_SIZE === 0) {
-            // Exact multiple of the chunk size - an extra empty final
-            // chunk (flag=1) is required so a truncation can't look like
-            // a clean end-of-stream.
-            const cipher = chacha20poly1305(payloadKey, chunkNonce(counter, true));
-            parts.push(cipher.encrypt(EMPTY));
-        }
-    }
+    let offset = 0;
+    let counter = 0;
+    do {
+        const takeLen = Math.min(plaintext.length - offset, CHUNK_SIZE);
+        const chunk = plaintext.subarray(offset, offset + takeLen);
+        offset += takeLen;
+        const isLast = offset >= plaintext.length;
+        parts.push(chacha20poly1305(payloadKey, chunkNonce(counter, isLast)).encrypt(chunk));
+        counter++;
+    } while (offset < plaintext.length);
     return concatBytes(...parts);
 }
 
+// Reads both what age writes and the trailing empty final chunk this app
+// wrote for 64 KiB multiples before 2026-10-26, so those files still open.
 function streamDecrypt(payloadKey, data) {
     if (data.length === 0) {
         throw new Error('malformed age payload: empty STREAM body');
@@ -296,19 +330,43 @@ function encryptAgeFile(plaintext, { ciphertext, sharedSecret }) {
 // hands that whole ciphertext to the device, which decapsulates both halves
 // and answers with the finished shared secret; there is no host-side ML-KEM
 // step and nothing to split. Returns the decrypted plaintext as a Uint8Array.
+//
+// A file may be encrypted to several recipients, so every mlkem768x25519
+// stanza is tried in order until one opens (each try is a decapsulation, so
+// on the device each is a confirmation). Malformed stanzas are rejected, as
+// age.md requires, before anything is decapsulated.
 async function decryptAgeFile(fileBytes, deriveSharedSecret) {
     const bytes = fileBytes instanceof Uint8Array ? fileBytes : new Uint8Array(fileBytes);
     const { stanzas, headerNoMac, mac, headerEndOffset } = parseHeader(bytes);
 
-    const stanza = stanzas.find((s) => s.type === STANZA_TYPE);
-    if (!stanza) {
+    const ours = stanzas.filter((s) => s.type === STANZA_TYPE);
+    if (ours.length === 0) {
         throw new Error(`no ${STANZA_TYPE} recipient stanza in this age file`);
     }
-    const ciphertext = b64Decode(stanza.args[0]);
-    const sealedFileKey = stanza.body;
+    for (const s of ours) {
+        if (s.args.length !== 1) throw new Error(`malformed ${STANZA_TYPE} stanza: expected 1 argument, got ${s.args.length}`);
+        if (!isCanonicalB64NoPad(s.args[0]) || b64Decode(s.args[0]).length !== 1120) {
+            throw new Error(`malformed ${STANZA_TYPE} stanza: the encapsulated key must be 1120 bytes of canonical base64`);
+        }
+        if (s.body.length !== 32) throw new Error(`malformed ${STANZA_TYPE} stanza: body must be 32 bytes, got ${s.body.length}`);
+    }
 
-    const sharedSecret = await deriveSharedSecret(ciphertext);
-    const fileKey = openFileKey(sharedSecret, ciphertext, sealedFileKey);
+    let fileKey = null;
+    for (const s of ours) {
+        const ciphertext = b64Decode(s.args[0]);
+        const sharedSecret = await deriveSharedSecret(ciphertext);
+        try {
+            fileKey = openFileKey(sharedSecret, ciphertext, s.body);
+            break;
+        } catch (e) {
+            // not this stanza's recipient; try the next one
+        }
+    }
+    if (!fileKey) {
+        throw new Error(ours.length === 1
+            ? 'this age file was not encrypted to this OnlyKey and label'
+            : `none of the ${ours.length} ${STANZA_TYPE} recipients in this age file is this OnlyKey and label`);
+    }
 
     const expectedMac = computeHeaderMac(fileKey, headerNoMac);
     if (!timingSafeEqual(expectedMac, mac)) {
@@ -326,4 +384,7 @@ module.exports = {
     openFileKey,
     encryptAgeFile,
     decryptAgeFile,
+    armorEncode,
+    armorDecode,
+    isArmored,
 };
