@@ -50,6 +50,13 @@ module.exports = {
 
                 var forge = app.forge;
                 var $ = app.$;
+                // A fetched key's user ID is attacker-controlled text; escape it
+                // before it is concatenated into the markup below.
+                function esc(s) {
+                    var d = document.createElement("div");
+                    d.textContent = String(s == null ? "" : s);
+                    return d.innerHTML;
+                }
 
                 // The fieldset used to get a random 'bright' rgba background on
                 // every render - a different washed-out hue per page and per
@@ -160,8 +167,8 @@ module.exports = {
                             page.p2g.getPublicKeyInfo(response_text, function(err, theKey) {
                                 if (theKey) {
 
-                                    var email = theKey.pgp.userids[0].components.email;
-                                    var username = theKey.pgp.userids[0].components.username;
+                                    var email = esc(theKey.pgp.userids[0].components.email);
+                                    var username = esc(theKey.pgp.userids[0].components.username);
                                     var keyid = "0x" + theKey.pgp.key_manager.get_pgp_key_id().toString("hex").toUpperCase();
                                     var keyid_short = theKey.pgp.key_manager.get_pgp_short_key_id();
                                     var fingerprint = theKey.pgp.get_fingerprint().toString("hex").toUpperCase();
@@ -233,8 +240,8 @@ module.exports = {
                                                                 if (theKey) {
 
 
-                                                                    var email = theKey.pgp.userids[0].components.email;
-                                                                    var username = theKey.pgp.userids[0].components.username;
+                                                                    var email = esc(theKey.pgp.userids[0].components.email);
+                                                                    var username = esc(theKey.pgp.userids[0].components.username);
                                                                     var keyid = "0x" + theKey.pgp.key_manager.get_pgp_key_id().toString("hex").toUpperCase();
                                                                     var keyid_short = theKey.pgp.key_manager.get_pgp_short_key_id();
                                                                     var fingerprint = theKey.pgp.get_fingerprint().toString("hex").toUpperCase();
