@@ -180,10 +180,21 @@ function encodeRecipient(pubkey) {
     return bech32Encode(RECIPIENT_HRP, pubkey);
 }
 
+// The same 1216-byte X-Wing public key as age's own native post-quantum
+// recipient (age.md: Bech32, HRP "age1pq"). age 1.3+, typage, and rage or any
+// older age with age-plugin-pq can encrypt to this without age-plugin-onlykey;
+// the OnlyKey identity still decrypts it.
+const NATIVE_RECIPIENT_HRP = 'age1pq';
+
+function encodeNativeRecipient(pubkey) {
+    return bech32Encode(NATIVE_RECIPIENT_HRP, pubkey);
+}
+
+// Accepts either spelling of an X-Wing recipient.
 function decodeRecipient(recipient) {
     const { hrp, data } = bech32Decode(String(recipient).trim().toLowerCase());
-    if (hrp !== RECIPIENT_HRP || data === null) {
-        throw new Error(`not a valid ${RECIPIENT_HRP} recipient: ${recipient}`);
+    if ((hrp !== RECIPIENT_HRP && hrp !== NATIVE_RECIPIENT_HRP) || data === null || data.length !== XWING_PK) {
+        throw new Error(`not a valid ${RECIPIENT_HRP} or ${NATIVE_RECIPIENT_HRP} recipient: ${recipient}`);
     }
     return data;
 }
@@ -218,6 +229,7 @@ module.exports = {
     xwingEncapsHost,
     deriveLabelTag,
     encodeRecipient,
+    encodeNativeRecipient,
     decodeRecipient,
     encodeIdentity,
     decodeIdentity,

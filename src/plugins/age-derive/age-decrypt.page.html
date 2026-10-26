@@ -9,8 +9,8 @@
     <label for="identity_out">Identity (age -d -i ...)</label>
     <input readonly="readonly" type="text" id="identity_out" />
 
-    <label for="decrypt_file_in">age file to decrypt (base64)</label>
-    <textarea placeholder="Paste base64 age file" rows="4" id="decrypt_file_in"></textarea>
+    <label for="decrypt_file_in">age file to decrypt (ASCII armor, as written by age -a, rage -a, typage or this page)</label>
+    <textarea placeholder="-----BEGIN AGE ENCRYPTED FILE-----" rows="4" id="decrypt_file_in"></textarea>
     <button type="button" id="decrypt_start" value="Decrypt">Decrypt</button>
 
     <label for="decrypted_out">Decrypted plaintext</label>

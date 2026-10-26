@@ -27,11 +27,6 @@ function b64ToBytes(b64) {
     return bytes;
 }
 
-function bytesToB64(bytes) {
-    var bin = '';
-    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-    return btoa(bin);
-}
 
 module.exports = {
     pagesList: pagesList,
@@ -118,7 +113,14 @@ module.exports = {
                             new TextEncoder().encode(plaintext),
                             { ciphertext: encaps.ciphertext, sharedSecret: encaps.sharedSecret }
                         );
-                        $("#age_file_out").val(bytesToB64(fileBytes));
+                        // age's own spelling of this key: age 1.3+, typage, and
+                        // rage or older age with age-plugin-pq encrypt to it
+                        // without age-plugin-onlykey.
+                        $("#recipient_out").val(agePqc.encodeNativeRecipient(recipientPk));
+                        // ASCII armor (age.md), which age -d, rage -d and
+                        // typage read as is. This used to be bare base64 of
+                        // the binary file, which no other age tool reads.
+                        $("#age_file_out").val(ageFile.armorEncode(fileBytes));
                         $("#identity_out").val(agePqc.encodeIdentity(label));
                     });
                 });
@@ -128,9 +130,13 @@ module.exports = {
                     $("#decrypted_out").val("");
                     var fileBytes;
                     try {
-                        fileBytes = b64ToBytes($("#decrypt_file_in").val());
+                        // ASCII armor from age -a, rage -a, typage or this page.
+                        // Earlier versions of this page wrote bare base64 of
+                        // the binary file, so that is still read.
+                        var input = $("#decrypt_file_in").val();
+                        fileBytes = ageFile.isArmored(input) ? ageFile.armorDecode(input) : b64ToBytes(input);
                     } catch (e) {
-                        $("#decrypted_out").val("ERROR: invalid base64: " + e.message);
+                        $("#decrypted_out").val("ERROR: could not read the age file: " + e.message);
                         return;
                     }
 
