@@ -88,19 +88,38 @@ function hpkeKeyScheduleBase(sharedSecret, info) {
     return { key, baseNonce };
 }
 
-// enc: 1120-byte X-Wing ciphertext (kem_context). fileKey: 16 bytes.
-// Returns the 32-byte sealed file key (16 plaintext + 16 tag).
+// C2SP age.md, "mlkem768x25519 recipient stanza": SealBase/OpenBase with this
+// info. X-Wing is not a DHKEM - its Encaps already returns the HPKE shared
+// secret (the SHA3-256 combiner output) - so that secret goes straight into
+// the key schedule; there is no ExtractAndExpand over enc. The construction
+// shipped before 2026-10-26 did both of those differently and produced
+// stanzas the age tool could not open (and could not open age's). It is kept
+// below, read-only, for files already written.
+const AGE_PQ_INFO = utf8('age-encryption.org/mlkem768x25519');
+
+// fileKey: 16 bytes. Returns the 32-byte sealed file key (16 plaintext + 16 tag).
 function sealFileKey(sharedSecret, enc, fileKey) {
-    const hpkeSs = hpkeExtractAndExpand(sharedSecret, enc);
-    const { key, baseNonce } = hpkeKeyScheduleBase(hpkeSs, EMPTY);
+    const { key, baseNonce } = hpkeKeyScheduleBase(sharedSecret, AGE_PQ_INFO);
     return chacha20poly1305(key, baseNonce).encrypt(fileKey);
 }
 
-// Returns the 16-byte file key, or throws on a bad tag (wrong shared secret).
-function openFileKey(sharedSecret, enc, sealedFileKey) {
+function openLegacyFileKey(sharedSecret, enc, sealedFileKey) {
     const hpkeSs = hpkeExtractAndExpand(sharedSecret, enc);
     const { key, baseNonce } = hpkeKeyScheduleBase(hpkeSs, EMPTY);
     return chacha20poly1305(key, baseNonce).decrypt(sealedFileKey);
+}
+
+// Returns the 16-byte file key, or throws on a bad tag (wrong shared secret).
+// Tries the age construction first, then the pre-2026-10-26 one; both are
+// AEAD tag checks under keys derived from the same secret.
+function openFileKey(sharedSecret, enc, sealedFileKey) {
+    if (sealedFileKey.length !== 32) throw new Error('mlkem768x25519 stanza body must be 32 bytes');
+    const { key, baseNonce } = hpkeKeyScheduleBase(sharedSecret, AGE_PQ_INFO);
+    try {
+        return chacha20poly1305(key, baseNonce).decrypt(sealedFileKey);
+    } catch (e) {
+        return openLegacyFileKey(sharedSecret, enc, sealedFileKey);
+    }
 }
 
 // ---- base64 (standard alphabet, unpadded, per the age spec) --------------
