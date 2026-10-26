@@ -37,11 +37,11 @@ var cspOptions = {
         ]
     },
     hashEnabled: {
-        'script-src': true,
+        'script-src': false,
         'style-src': true
     },
     nonceEnabled: {
-        'script-src': true,
+        'script-src': false,
         'style-src': true
     },
     //processFn: defaultProcessFn
