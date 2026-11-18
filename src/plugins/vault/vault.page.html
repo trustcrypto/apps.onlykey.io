@@ -8,20 +8,23 @@
 <details class="vault-crypto">
     <summary>How your secrets are encrypted</summary>
     <ul>
-        <li><b>Algorithm:</b> ML-KEM-768 + X25519 (X-Wing), a post-quantum hybrid key encapsulation, with
-            AES-256-GCM for the secret itself.</li>
+        <li><b>Format:</b> each secret is a standard <a href="https://age-encryption.org" target="_blank">age</a>
+            file encrypted to an ML-KEM-768 + X25519 (X-Wing) key, the post-quantum hybrid age uses natively.
+            It is the same derived key and file format as the age page and age-plugin-onlykey.</li>
         <li><b>On the OnlyKey:</b> for each service name the device derives an X-Wing key pair from its
             web-derivation key, a random 32-byte key generated on the OnlyKey, and
             SHA-256(&quot;vault:&quot; + service name). The private key never leaves the OnlyKey.</li>
-        <li><b>Store:</b> this page gets the service's public key from the OnlyKey (no tap needed) and
-            encapsulates a fresh shared secret to it. HKDF-SHA256 turns that secret into a non-exportable
-            AES-256-GCM key (WebCrypto), which encrypts the secret with a random 96-bit nonce and the service
-            name as associated data. Only the 1120-byte KEM ciphertext and the AES-GCM ciphertext are stored
-            (IndexedDB).</li>
-        <li><b>Unlock:</b> the KEM ciphertext goes to the OnlyKey, which decapsulates it (both the ML-KEM and the
-            X25519 halves) and returns the shared secret over the encrypted OnlyKey connection. Every unlock
-            needs a tap, or the challenge code shown below if your OnlyKey is set to challenge mode. Unlocked keys
-            stay in memory for the session time you choose, until Lock all sessions or the page closes.</li>
+        <li><b>Store:</b> this page gets the service's public key from the OnlyKey (no tap needed) and writes
+            the age file here: X-Wing (HPKE) wraps a random file key, and the secret is encrypted with
+            ChaCha20-Poly1305. Only the age file is stored, in this browser (IndexedDB).</li>
+        <li><b>Unlock:</b> the file's X-Wing ciphertext goes to the OnlyKey, which decapsulates it (both the
+            ML-KEM and the X25519 halves) and returns the shared secret over the encrypted OnlyKey connection.
+            Every unlock needs a tap, or the challenge code shown below if your OnlyKey is set to challenge mode.
+            Unlocked entries stay open in memory for the session time you choose, until Lock all sessions or
+            the page closes.</li>
+        <li><b>Command line:</b> Copy age file and Copy age identity give you the file and an identity line;
+            with age-plugin-onlykey installed, <code>age -d -i identity.txt secret.age</code> opens it with the
+            same OnlyKey.</li>
         <li><b>Recovery:</b> the same OnlyKey and service name always give the same key pair, so an exported
             vault opens on any computer with that OnlyKey, or with a key restored from its backup.</li>
     </ul>
@@ -37,8 +40,8 @@
         <option value="startup">Session: until page closes</option>
     </select>
     <button type="submit" id="vault_add_btn">Encrypt &amp; Store with OnlyKey</button>
-    <textarea readonly id="vault_add_result" class="startHidden" rows="3"
-        placeholder="Encrypted blob appears here — safe to copy, commit, share"></textarea>
+    <textarea readonly id="vault_add_result" class="startHidden" rows="8"
+        placeholder="The age file appears here — safe to copy, commit, share"></textarea>
 </fieldset>
 
 <div id="challenge_code_box" class="oa-challenge">

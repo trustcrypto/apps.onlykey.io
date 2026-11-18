@@ -1,10 +1,11 @@
 /**
  * OnlyKey Vault - hardware-encrypted credential manager.
  *
- * Secrets are encrypted with ML-KEM-768 + X25519 (X-Wing) keys derived on the
- * OnlyKey per service; see vault-crypto.js for the scheme. IndexedDB stores
- * only ciphertext. Session cache holds non-extractable CryptoKey objects in
- * memory with TTL policies.
+ * Each secret is an age file encrypted to the OnlyKey's derived
+ * ML-KEM-768 + X25519 (X-Wing) key for the service; see vault-crypto.js.
+ * IndexedDB stores only the age files. The session cache holds the X-Wing
+ * shared secrets of unlocked entries in memory with TTL policies, and zeroes
+ * them when they expire or are locked.
  */
 
 var vaultCrypto = require("./vault-crypto.js");
@@ -87,7 +88,7 @@ var OKVault = (function() {
         exportJSON: async function() {
             var entries = await this.list();
             return JSON.stringify({
-                version: 2,
+                version: vaultCrypto.VERSION,
                 exportedAt: new Date().toISOString(),
                 credentials: entries
             }, null, 2);
@@ -96,7 +97,7 @@ var OKVault = (function() {
         importJSON: async function(json, force) {
             var data = JSON.parse(json);
             if (!data.credentials || !Array.isArray(data.credentials) ||
-                data.version !== 2) {
+                data.version !== vaultCrypto.VERSION) {
                 throw new Error("Invalid vault export format");
             }
             var existing = await this.list();
@@ -123,6 +124,12 @@ var OKSessionCache = (function() {
     var _defaultPolicy = "session:30m";
     var _reaperInterval = null;
 
+    function wipe(serviceId) {
+        var entry = _cache.get(serviceId);
+        if (entry && entry.secret instanceof Uint8Array) entry.secret.fill(0);
+        _cache.delete(serviceId);
+    }
+
     function parsePolicy(policyStr) {
         if (!policyStr || policyStr === "always") {
             return { ttlMs: 0, sliding: false, noCache: true };
@@ -146,7 +153,7 @@ var OKSessionCache = (function() {
 
         setPolicy: function(serviceId, policy) {
             _policies.set(serviceId, policy);
-            if (policy === "always") _cache.delete(serviceId);
+            if (policy === "always") wipe(serviceId);
         },
 
         get: function(serviceId, tag) {
@@ -156,21 +163,22 @@ var OKSessionCache = (function() {
             if (entry.ttlMs > 0) {
                 var ref = entry.sliding ? entry.lastUsedAt : entry.createdAt;
                 if (Date.now() - ref > entry.ttlMs) {
-                    _cache.delete(serviceId);
+                    wipe(serviceId);
                     return null;
                 }
             }
             entry.lastUsedAt = Date.now();
-            return entry.aesKey;
+            return entry.secret;
         },
 
-        put: function(serviceId, aesKey, tag) {
+        put: function(serviceId, secret, tag) {
             var policyStr = this.getPolicy(serviceId);
             var parsed = parsePolicy(policyStr);
-            if (parsed.noCache) return;
+            if (parsed.noCache) { secret.fill(0); return; }
+            wipe(serviceId);
             var now = Date.now();
             _cache.set(serviceId, {
-                aesKey: aesKey,
+                secret: secret,
                 tag: tag,
                 createdAt: now,
                 lastUsedAt: now,
@@ -180,8 +188,8 @@ var OKSessionCache = (function() {
             });
         },
 
-        evict: function(serviceId) { _cache.delete(serviceId); },
-        clear: function() { _cache.clear(); },
+        evict: function(serviceId) { wipe(serviceId); },
+        clear: function() { Array.from(_cache.keys()).forEach(wipe); },
 
         status: function() {
             var now = Date.now();
@@ -208,7 +216,7 @@ var OKSessionCache = (function() {
                     if (now - ref > entry.ttlMs) expired.push(serviceId);
                 }
             });
-            expired.forEach(function(id) { _cache.delete(id); });
+            expired.forEach(function(id) { wipe(id); });
         },
 
         startReaper: function() {
@@ -251,7 +259,8 @@ module.exports = {
                 // this module under plain Node to read pagesList, and
                 // age_pqc.js needs the bundler's @noble aliases.
                 var agePqc = require("../../onlykey-fido2/onlykey/age_pqc.js");
-                var vc = vaultCrypto.create(ok, agePqc);
+                var ageFile = require("../../onlykey-fido2/onlykey/age_file.js");
+                var vc = vaultCrypto.create(ok, agePqc, ageFile);
 
                 ok.on("status", function(msg) { log(msg); });
                 ok.on("challenge", function(code) {
@@ -283,29 +292,29 @@ module.exports = {
                     return d.innerHTML;
                 }
 
-                // The AES key for a stored entry, from the session cache or
-                // the OnlyKey. X-Wing decapsulation happens on the device,
-                // after you confirm there.
-                async function unlock(entry) {
+                // Decrypt an entry, with the shared secret from the session
+                // cache or from the OnlyKey (X-Wing decapsulation on the
+                // device, after you confirm there).
+                async function reveal(entry) {
                     var tag = vaultCrypto.cacheTag(entry);
                     var cached = OKSessionCache.get(entry.serviceId, tag);
-                    if (cached) return cached;
-                    log("Confirm on your OnlyKey to unlock \"" + entry.serviceId + "\"...");
-                    var aesKey = await vc.keyFor(entry);
-                    OKSessionCache.put(entry.serviceId, aesKey, tag);
-                    renderSessions();
-                    return aesKey;
+                    if (!cached) log("Confirm on your OnlyKey to unlock \"" + entry.serviceId + "\"...");
+                    var r = await vc.open(entry, cached);
+                    if (r.secret) {
+                        OKSessionCache.put(entry.serviceId, r.secret, tag);
+                        renderSessions();
+                    }
+                    return r.plaintext;
                 }
 
-                // Encrypt and store a secret under a fresh X-Wing
-                // encapsulation to the service's OnlyKey public key. Getting
-                // the public key needs no press.
+                // Encrypt a secret as an age file to the service's OnlyKey
+                // X-Wing public key, and store it. Getting the public key
+                // needs no press.
                 async function store(serviceId, plaintext, policy) {
-                    var key = await vc.newKey(serviceId);
-                    var entry = await vc.sealEntry(serviceId, plaintext, key);
-                    entry.policy = policy;
-                    var saved = await OKVault.put(entry);
-                    OKSessionCache.put(serviceId, key.aesKey, vaultCrypto.cacheTag(entry));
+                    var r = await vc.seal(serviceId, plaintext);
+                    r.entry.policy = policy;
+                    var saved = await OKVault.put(r.entry);
+                    OKSessionCache.put(serviceId, r.secret, vaultCrypto.cacheTag(r.entry));
                     renderSessions();
                     return saved;
                 }
@@ -322,9 +331,10 @@ module.exports = {
                         return '<fieldset class="vault-entry" data-service="' + esc(e.serviceId) + '">' +
                             '<input readonly type="text" value="' + esc(e.serviceId) +
                             ' · ' + esc(e.policy || "session:30m") +
-                            (e.v === 2 ? '' : ' · old test format, delete and add again') +
+                            (vaultCrypto.isValidEntry(e) ? '' : ' · old test format, delete and add again') +
                             (hasSession ? ' · session active' : '') + '" />' +
-                            '<button type="button" class="btn-secondary vault-copy-blob">Copy blob</button>' +
+                            '<button type="button" class="btn-secondary vault-copy-blob">Copy age file</button>' +
+                            '<button type="button" class="btn-secondary vault-copy-identity">Copy age identity</button>' +
                             '<button type="button" class="btn-secondary vault-copy-secret">Copy secret (touch)</button>' +
                             '<button type="button" class="btn-danger vault-delete">Delete</button>' +
                             '</fieldset>';
@@ -360,7 +370,7 @@ module.exports = {
                         log("Getting the vault key for \"" + serviceId + "\" from your OnlyKey...");
                         var saved = await store(serviceId, secret, policy);
                         $page.find("#vault_secret").val("");
-                        $page.find("#vault_add_result").val(vaultCrypto.blobOf(saved)).removeClass("startHidden");
+                        $page.find("#vault_add_result").val(saved.age).removeClass("startHidden");
                         log('Encrypted and stored "' + serviceId + '" — plaintext cleared');
                         renderVault();
                     } catch (err) {
@@ -375,12 +385,14 @@ module.exports = {
                     if (!entry) return;
 
                     if ($(this).hasClass("vault-copy-blob")) {
-                        await navigator.clipboard.writeText(vaultCrypto.blobOf(entry));
-                        log('Copied encrypted blob for "' + serviceId + '"');
+                        await navigator.clipboard.writeText(entry.age);
+                        log('Copied the age file for "' + serviceId + '"');
+                    } else if ($(this).hasClass("vault-copy-identity")) {
+                        await navigator.clipboard.writeText(vc.identityFor(serviceId) + "\n");
+                        log('Copied the age identity for "' + serviceId + '" - save it as identity.txt for age -d -i identity.txt (needs age-plugin-onlykey)');
                     } else if ($(this).hasClass("vault-copy-secret")) {
                         try {
-                            var aesKey = await unlock(entry);
-                            var plaintext = await vc.openEntry(entry, aesKey);
+                            var plaintext = await reveal(entry);
                             await navigator.clipboard.writeText(plaintext);
                             log('Secret for "' + serviceId + '" copied to clipboard');
                             plaintext = null;

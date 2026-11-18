@@ -1,94 +1,40 @@
 /**
- * Vault encryption.
+ * Vault encryption: every secret is a standard age file (age-encryption.org/v1)
+ * encrypted to the OnlyKey's derived ML-KEM-768 + X25519 (X-Wing) key for the
+ * label "vault:<service>" - the same derived keys and file format as the age
+ * page and age-plugin-onlykey.
  *
- * Entries are "v": 2, ML-KEM-768 + X25519 (X-Wing, draft-connolly-cfrg-xwing-kem).
- *   Each service gets its own X-Wing key pair, derived on the OnlyKey from the
- *   label "vault:<service>". The private half never leaves the device.
- *   - Store: the page asks the OnlyKey for that service's public key (no
- *     press), encapsulates to it here, and turns the 32-byte shared secret
- *     into an AES-256-GCM key with HKDF-SHA256. The entry keeps the 1120-byte
- *     KEM ciphertext next to the AES-GCM ciphertext.
- *   - Read: the KEM ciphertext goes to the OnlyKey, which decapsulates it
- *     (both the ML-KEM and the X25519 halves) after you confirm on the device,
- *     and hands back the shared secret; the same HKDF gives the AES key.
- *   The AES key is non-extractable, and the service name is bound in as
- *   AES-GCM additional data, so a blob moved to another service fails.
- * *
+ * - Store: the page asks the OnlyKey for the service's X-Wing public key (no
+ *   press) and writes an age file to it here: an mlkem768x25519 recipient
+ *   stanza (HPKE X-Wing wraps a random 16-byte file key) and a
+ *   ChaCha20-Poly1305 STREAM body. The private key never leaves the OnlyKey.
+ * - Read: the stanza's 1120-byte X-Wing ciphertext goes to the OnlyKey, which
+ *   decapsulates it (both halves) after you confirm on the device and returns
+ *   the shared secret; the file key and then the secret are opened here.
+ * - Command line: the same file opens with
+ *       age -d -i identity.txt
+ *   where identity.txt holds identityFor(service) and age-plugin-onlykey is
+ *   installed.
+ *
+ * Entries are { v: 3, serviceId, age: <armored age file>, policy }.
+ *
  * Plain CommonJS with no bundler-only imports, so the test kit can require it
- * under Node. X-Wing encapsulation (age_pqc.js) is passed in by the caller.
+ * under Node. age_pqc.js and age_file.js are passed in by the caller.
  */
 "use strict";
 
 var LABEL_PREFIX = "vault:";
-var XWING_CT = 1120;
 var XWING_PK = 1216;
-
-var enc = new TextEncoder();
-var V2_SALT = enc.encode("onlykey-vault-v2");
-var V2_INFO_PREFIX = "xwing-mlkem768-x25519|";
-var V2_AAD_PREFIX = "onlykey-vault-v2|";
+var VERSION = 3;
 
 function labelFor(serviceId) {
     return LABEL_PREFIX + serviceId;
 }
 
-function toB64(bytes) {
-    var s = "";
-    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-    return btoa(s);
-}
-
-function fromB64(b64) {
-    return Uint8Array.from(atob(b64), function(c) { return c.charCodeAt(0); });
-}
-
-function toBytes(secret) {
-    if (secret instanceof Uint8Array) return secret;
-    if (Array.isArray(secret)) return new Uint8Array(secret);
-    var s = String(secret);
-    if (/^[0-9a-fA-F]+$/.test(s) && s.length % 2 === 0) {
-        var out = new Uint8Array(s.length / 2);
-        for (var i = 0; i < out.length; i++) out[i] = parseInt(s.substr(i * 2, 2), 16);
-        return out;
-    }
-    return enc.encode(s);
-}
-
-async function hkdfAesKey(ikm, salt, info) {
-    var base = await crypto.subtle.importKey("raw", ikm, { name: "HKDF" }, false, ["deriveKey"]);
-    return crypto.subtle.deriveKey(
-        { name: "HKDF", hash: "SHA-256", salt: salt, info: info },
-        base,
-        { name: "AES-GCM", length: 256 },
-        false, // NON-EXTRACTABLE
-        ["encrypt", "decrypt"]
-    );
-}
-
-function v2Key(sharedSecret, serviceId) {
-    return hkdfAesKey(sharedSecret, V2_SALT, enc.encode(V2_INFO_PREFIX + labelFor(serviceId)));
-}
-
-function aadFor(entry) {
-    return enc.encode(V2_AAD_PREFIX + entry.serviceId);
-}
-
-async function seal(aesKey, plaintext, aad) {
-    var nonce = crypto.getRandomValues(new Uint8Array(12));
-    var params = { name: "AES-GCM", iv: nonce, additionalData: aad };
-    var ct = new Uint8Array(await crypto.subtle.encrypt(params, aesKey, enc.encode(plaintext)));
-    var out = new Uint8Array(12 + ct.length);
-    out.set(nonce);
-    out.set(ct, 12);
-    return toB64(out);
-}
-
-async function open(aesKey, b64, aad) {
-    var raw = fromB64(b64);
-    if (raw.length < 28) throw new Error("Blob too short");
-    var params = { name: "AES-GCM", iv: raw.slice(0, 12), additionalData: aad };
-    var pt = await crypto.subtle.decrypt(params, aesKey, raw.slice(12));
-    return new TextDecoder().decode(pt);
+function toBytes(v) {
+    if (v instanceof Uint8Array) return v;
+    if (Array.isArray(v)) return new Uint8Array(v);
+    throw new Error("unexpected value from the OnlyKey");
 }
 
 function callback(fn) {
@@ -102,9 +48,10 @@ function callback(fn) {
 
 /**
  * ok      - the onlykey3rd() api object (derive_xwing_recipient/_decap)
- * agePqc  - age_pqc.js (xwingEncapsHost)
+ * agePqc  - age_pqc.js (xwingEncapsHost, encodeIdentity)
+ * ageFile - age_file.js (encryptAgeFile, decryptAgeFile, armor)
  */
-function create(ok, agePqc) {
+function create(ok, agePqc, ageFile) {
 
     function recipient(serviceId) {
         return callback(function(cb) { ok.derive_xwing_recipient(labelFor(serviceId), cb); })
@@ -122,72 +69,74 @@ function create(ok, agePqc) {
             .then(toBytes);
     }
 
-    /** A fresh v2 key for a service: no press. Returns { kem, aesKey }. */
-    async function newKey(serviceId) {
+    /**
+     * Encrypt a secret for a service. No press.
+     * Returns { entry, secret }: secret is a copy of the X-Wing shared secret,
+     * for the session cache.
+     */
+    async function seal(serviceId, plaintext) {
         var pk = await recipient(serviceId);
         var e = agePqc.xwingEncapsHost(pk);
-        var ss = toBytes(e.sharedSecret);
         try {
-            return { kem: toB64(toBytes(e.ciphertext)), aesKey: await v2Key(ss, serviceId) };
+            var file = ageFile.encryptAgeFile(new TextEncoder().encode(plaintext),
+                { ciphertext: e.ciphertext, sharedSecret: e.sharedSecret });
+            return {
+                entry: { v: VERSION, serviceId: serviceId, age: ageFile.armorEncode(file) },
+                secret: Uint8Array.from(e.sharedSecret)
+            };
         } finally {
-            ss.fill(0);
+            e.sharedSecret.fill(0);
         }
     }
 
-    /** The AES key for an existing entry: device confirmation required. */
-    async function keyFor(entry) {
-        if (entry.v !== 2) throw new Error("Unsupported vault entry version " + entry.v);
-        var kemCt = fromB64(entry.kem);
-        if (kemCt.length !== XWING_CT) {
-            throw new Error("X-Wing ciphertext must be " + XWING_CT + " bytes, got " + kemCt.length);
-        }
-        var ss = await decap(entry.serviceId, kemCt);
-        try { return await v2Key(ss, entry.serviceId); } finally { ss.fill(0); }
+    /**
+     * Decrypt an entry. With cachedSecret (from an earlier seal/open of this
+     * same entry) the OnlyKey is not asked; otherwise it decapsulates, after
+     * a press. Returns { plaintext, secret }: secret is the shared secret the
+     * OnlyKey returned (a copy, for the session cache), or null if the cache
+     * was used.
+     */
+    async function open(entry, cachedSecret) {
+        if (entry.v !== VERSION) throw new Error("Unsupported vault entry version " + entry.v);
+        var fresh = null;
+        var bytes = await ageFile.decryptAgeFile(ageFile.armorDecode(entry.age), async function(kemCt) {
+            if (cachedSecret) return Uint8Array.from(cachedSecret);
+            var ss = await decap(entry.serviceId, kemCt);
+            fresh = Uint8Array.from(ss);
+            return ss;
+        });
+        return { plaintext: new TextDecoder().decode(bytes), secret: fresh };
     }
 
-    /** Encrypt a secret for a service under a key from newKey(). */
-    async function sealEntry(serviceId, plaintext, key) {
-        var entry = { v: 2, serviceId: serviceId, kem: key.kem };
-        entry.encrypted = await seal(key.aesKey, plaintext, aadFor(entry));
-        return entry;
-    }
-
-    function openEntry(entry, aesKey) {
-        return open(aesKey, entry.encrypted, aadFor(entry));
+    /** The age identity line that opens this service's entries with age-plugin-onlykey. */
+    function identityFor(serviceId) {
+        return agePqc.encodeIdentity(labelFor(serviceId));
     }
 
     return {
-        newKey: newKey,
-        keyFor: keyFor,
-        sealEntry: sealEntry,
-        openEntry: openEntry
+        seal: seal,
+        open: open,
+        identityFor: identityFor
     };
 }
 
-/** Tag a cached key with the entry it opens: each key is only good for one KEM ciphertext. */
+/** Tag a cached secret with the entry it opens: each secret belongs to one age file. */
 function cacheTag(entry) {
-    return entry.kem;
-}
-
-/** The text "Copy blob" puts on the clipboard. */
-function blobOf(entry) {
-    return JSON.stringify({ v: 2, serviceId: entry.serviceId, kem: entry.kem, encrypted: entry.encrypted });
+    return entry.age;
 }
 
 /** Import check: an entry this page can open. */
 function isValidEntry(entry) {
-    if (!entry || typeof entry.serviceId !== "string" || !entry.serviceId || typeof entry.encrypted !== "string") {
-        return false;
-    }
-    if (entry.v !== 2 || typeof entry.kem !== "string") return false;
-    try { return fromB64(entry.kem).length === XWING_CT; } catch (e) { return false; }
+    return !!entry && entry.v === VERSION &&
+        typeof entry.serviceId === "string" && entry.serviceId.length > 0 &&
+        typeof entry.age === "string" &&
+        /^\s*-----BEGIN AGE ENCRYPTED FILE-----/.test(entry.age);
 }
 
 module.exports = {
     create: create,
     cacheTag: cacheTag,
-    blobOf: blobOf,
     isValidEntry: isValidEntry,
     labelFor: labelFor,
-    XWING_CT: XWING_CT
+    VERSION: VERSION
 };
