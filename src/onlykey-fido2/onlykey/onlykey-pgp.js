@@ -127,6 +127,9 @@ module.exports = function(imports) {
       var MAX_LARGE_RESP_CHUNK = 512;
       // RSA-4096 needs 2 polls; the cap only bounds a misbehaving device.
       var MAX_RESPONSE_POLLS = 8;
+      // Empty "success" polls in a row before giving up (about 3 s apart).
+      var MAX_EMPTY_POLLS = 10;
+      var _empty_polls = 0;
 
       async function collect_response_tail(first) {
         var full = Array.from(first);
@@ -209,10 +212,25 @@ module.exports = function(imports) {
             else {
               console.log(ctaphid_response.status);
               if (ctaphid_response.status == "CTAP2_ERR_USER_ACTION_PENDING") {
+                _empty_polls = 0;
+                data = "PENDING";
+                _$status('pending_challenge');
+              }
+              else if (!response) {
+                // A poll can arrive after the code is entered but before the
+                // key has staged its result. The key then answers with a bare
+                // success status and no data. That means "not ready yet", not
+                // a result: keep polling, as for USER_ACTION_PENDING, but not
+                // forever.
+                if (++_empty_polls > MAX_EMPTY_POLLS) {
+                  _empty_polls = 0;
+                  return cb("Error no response from OnlyKey", null);
+                }
                 data = "PENDING";
                 _$status('pending_challenge');
               }
               else {
+                _empty_polls = 0;
                 // The session key is NOT logged. It was, on this line, until
                 // this change: a console line carrying onlykeyApi.sharedsec
                 // hands the whole session to anything that can read the console.
